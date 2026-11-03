@@ -18,7 +18,7 @@ jobs:
           cache: npm
 
       - name: Install
-        run: npm ci
+        run: npm ci --no-audit --no-fund
 
       - name: Dependency audit
         run: npm audit --audit-level=high
@@ -26,17 +26,25 @@ jobs:
       - name: Build (web + worker bundle)
         run: npm run build
 
-      - name: Start local Worker
+      # The Worker must start and be tested inside one step: a background process
+      # does not reliably survive between GitHub Actions steps.
+      - name: Worker + end-to-end API suite
         run: |
-          npx wrangler dev --port 8787 --local > wrangler.log 2>&1 &
-          for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8787/api/health > /dev/null; then exit 0; fi
+          set -euo pipefail
+          npx wrangler dev --port 8787 --local --log-level warn > wrangler.log 2>&1 &
+          WPID=$!
+          trap 'kill "$WPID" 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8787/api/health > /dev/null; then
+              echo "worker ready after ${i}s"
+              break
+            fi
             sleep 1
           done
-          echo "Worker did not start"; cat wrangler.log; exit 1
+          curl -fsS http://127.0.0.1:8787/api/health > /dev/null || { echo "worker did not start"; cat wrangler.log; exit 1; }
 
-      - name: End-to-end API suite (auth, books, drive, AI, lock)
-        run: FFP_PIN=135790 npm run smoke
+          FFP_PIN=135790 node scripts/smoke.mjs
 
       - name: Upload worker log on failure
         if: failure()
@@ -47,4 +55,4 @@ jobs:
 
   # Deployment stays manual: the site is published through Freebuff Sites
   # (sites_deploy), not `wrangler deploy`. Add a CLOUDFLARE_API_TOKEN secret and a
-  # deploy step here only if you move hosting to a plain Cloudflare account.
+  # deploy job here only if hosting moves to a plain Cloudflare account.
