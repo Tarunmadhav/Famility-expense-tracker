@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Build (web + worker bundle)
+        run: npm run build
+
+      - name: Start local Worker
+        run: |
+          npx wrangler dev --port 8787 --local > wrangler.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8787/api/health > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "Worker did not start"; cat wrangler.log; exit 1
+
+      - name: End-to-end API suite (auth, books, drive, AI, lock)
+        run: FFP_PIN=135790 npm run smoke
+
+      - name: Upload worker log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrangler-log
+          path: wrangler.log
+
+  # Deployment stays manual: the site is published through Freebuff Sites
+  # (sites_deploy), not `wrangler deploy`. Add a CLOUDFLARE_API_TOKEN secret and a
+  # deploy step here only if you move hosting to a plain Cloudflare account.

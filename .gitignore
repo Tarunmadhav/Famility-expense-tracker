@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+.wrangler/
+.secrets/
+backups/
+*.apk
+android/build/
+android/.gradle/
+.dev.vars
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+
+# backups and encrypted exports
+*.sql
+*.sql.age
+*.sha256
+*.age
