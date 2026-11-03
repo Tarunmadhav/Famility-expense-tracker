@@ -132,6 +132,7 @@ function securityHeaders(res) {
   headers.set('Permissions-Policy', 'geolocation=(), camera=(), microphone=(), interest-cohort=()');
   headers.set('Cross-Origin-Opener-Policy', 'same-origin');
   headers.set('Cross-Origin-Resource-Policy', 'same-origin');
+  headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   headers.set('X-Robots-Tag', 'noindex, nofollow');
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
