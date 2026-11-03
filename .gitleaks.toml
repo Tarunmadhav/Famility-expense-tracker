@@ -1,0 +1,9 @@
+title = "Family Finance Planner"
+
+# The PWA icons are inlined as base64 PNG in src/icons.js. Random base64
+# occasionally contains an "AKIA"-shaped substring, which matches the AWS
+# access-token rule. It is image data, not a credential, so that one file is
+# allowlisted by path and nothing else is.
+[allowlist]
+description = "inline base64 PNG icons are not credentials"
+paths = ['''src/icons\.js''']
