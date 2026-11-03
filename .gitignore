@@ -19,3 +19,7 @@ android/.gradle/
 *.sql.age
 *.sha256
 *.age
+
+# local tooling and scan output
+tools/
+artifacts/
