@@ -6,7 +6,7 @@ import { SEED, SETTINGS } from './seed.js';
 import { generateVapidKeys, sendPushToAll } from './push.js';
 import { protectDoc, revealDoc, encryptionReady } from './fieldcrypto.js';
 
-export const SCHEMA_VERSION = '6';
+export const SCHEMA_VERSION = '7';
 // 100 000 is the maximum iteration count the production Workers runtime supports
 // for PBKDF2-SHA256; attempts are additionally rate limited (8 per 15 minutes per IP).
 const PBKDF2_ITERATIONS = 100000;
@@ -33,6 +33,7 @@ const STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS files_created_idx ON files (space, created_at DESC)`,
   `CREATE TABLE IF NOT EXISTS ai_connections (id TEXT PRIMARY KEY, provider TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL, api_key TEXT NOT NULL, created_by TEXT, created_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS family_invites (code TEXT PRIMARY KEY, created_by TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', expires_at INTEGER NOT NULL, used_by TEXT, used_at INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, hits INTEGER NOT NULL DEFAULT 0)`,
 ];
 
 let schemaReady = false;
@@ -1047,6 +1048,26 @@ export async function pruneChanges(env) {
   await setMeta(env, 'prune', Date.now());
   await env.DB.prepare(`DELETE FROM changes WHERE ts < ?`).bind(cutoff).run();
   await setMeta(env, 'floor', head ? head.rev : 0);
+}
+
+/* ---------------------------------------------------------- rate limits */
+
+/**
+ * Fixed-window limiter keyed per user. Returns true when the caller is over the
+ * allowance. One statement, so a write costs one extra round-trip.
+ */
+export async function hitRateLimit(env, key, limit, windowMs) {
+  const bucket = Math.floor(Date.now() / windowMs) * windowMs;
+  const row = await env.DB.prepare(
+    `INSERT INTO rate_limits (key, window_start, hits) VALUES (?, ?, 1)
+     ON CONFLICT(key) DO UPDATE SET
+       hits = CASE WHEN rate_limits.window_start = excluded.window_start THEN rate_limits.hits + 1 ELSE 1 END,
+       window_start = excluded.window_start
+     RETURNING hits`,
+  )
+    .bind(key, bucket)
+    .first();
+  return Boolean(row && Number(row.hits) > limit);
 }
 
 /* ------------------------------------------------------------- http error */

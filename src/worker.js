@@ -42,6 +42,7 @@ import {
   getMeta,
   getSession,
   getState,
+  hitRateLimit,
   isLockedOut,
   listCollection,
   listNotifications,
@@ -235,6 +236,24 @@ function requestSpace(request, session) {
   return spaceFor(request.headers.get('X-Space'), session);
 }
 
+/** The office book only holds work modules; anything else is rejected at the API. */
+const OFFICE_COLLECTIONS = new Set(['diary', 'contacts', 'expenses']);
+
+function assertSpaceCollection(space, collection) {
+  if (String(space).startsWith('o:') && !OFFICE_COLLECTIONS.has(String(collection))) {
+    throw new HttpError(400, 'That module is not available in the office book');
+  }
+}
+
+const WRITE_LIMIT = 120;
+const WRITE_WINDOW_MS = 60_000;
+
+async function enforceWriteLimit(env, userId) {
+  if (await hitRateLimit(env, `w:${userId}`, WRITE_LIMIT, WRITE_WINDOW_MS)) {
+    throw new HttpError(429, 'Too many changes in a minute. Wait a moment and try again.');
+  }
+}
+
 async function requireUser(request, env, url) {
   if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
   const token = readCookie(request, COOKIE);
@@ -362,6 +381,12 @@ async function handleApi(request, env, ctx, url) {
   const { session, token } = await requireUser(request, env, url);
   const space = requestSpace(request, session);
 
+  // Every authenticated mutation shares a per-user allowance; auth routes have
+  // their own stricter limiter and are excluded here.
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && !path.startsWith('/api/auth/')) {
+    await enforceWriteLimit(env, session.userId);
+  }
+
   if (path === '/api/auth/password' && method === 'POST') {
     const body = await readJson(request);
     const email = normaliseEmail(body.email || (await credentialsFor(env, session.userId))?.email || '');
@@ -466,6 +491,7 @@ async function handleApi(request, env, ctx, url) {
 
   if (path === '/api/records' && method === 'POST') {
     const body = await readJson(request);
+    assertSpaceCollection(space, body.collection);
     const out = await createRecord(env, space, String(body.collection || ''), body.doc || {}, session.userId);
     ctx.waitUntil(runBackground(env));
     return json(out);
@@ -475,6 +501,7 @@ async function handleApi(request, env, ctx, url) {
     const body = await readJson(request);
     const collection = String(body.collection || '');
     if (!COLLECTIONS[collection]) throw new HttpError(400, 'Unknown collection');
+    assertSpaceCollection(space, collection);
     const dedupeKey =
       collection === 'contacts'
         ? (doc) => {
@@ -491,6 +518,7 @@ async function handleApi(request, env, ctx, url) {
   if (recordMatch) {
     const collection = recordMatch[1];
     const id = recordMatch[2];
+    assertSpaceCollection(space, collection);
     if (method === 'PATCH') {
       const body = await readJson(request);
       const out = await updateRecord(env, space, collection, id, body.doc || {}, session.userId);

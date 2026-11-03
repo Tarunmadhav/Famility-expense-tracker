@@ -284,6 +284,27 @@ ok('only the owner can invite', memberInvite.status === 403, `got ${memberInvite
 const members = await call('/api/family/members');
 ok('member list shows roles', members.status === 200 && members.data.members.some((m) => m.role === 'owner'));
 
+const officeBlocked = await call('/api/records', {
+  method: 'POST',
+  headers: { 'X-Space': 'office' },
+  body: { collection: 'payments', doc: { payee: 'Not allowed here', amount: 10, status: 'Unpaid' } },
+});
+ok('office book rejects personal modules', officeBlocked.status === 400, `got ${officeBlocked.status}`);
+
+// Runs after the office check so the limiter does not block it.
+let limitedAt = 0;
+for (let i = 0; i < 140 && !limitedAt; i += 1) {
+  const res = await call('/api/notifications/read', { method: 'POST', body: { ids: [] } });
+  if (res.status === 429) limitedAt = i + 1;
+}
+ok('per-user write limit engages', limitedAt > 0, 'never limited');
+
+const blockedWrite = await call('/api/records', {
+  method: 'POST',
+  body: { collection: 'payments', doc: { payee: 'Over limit', amount: 1, status: 'Unpaid' } },
+});
+ok('a limited user cannot write', blockedWrite.status === 429, `got ${blockedWrite.status}`);
+
 // ------------------------------------------------------------------- lock
 const lockRes = await call('/api/auth/lock', { method: 'POST' });
 ok('lock revokes the session on the server', lockRes.status === 200);
