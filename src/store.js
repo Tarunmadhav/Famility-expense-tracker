@@ -58,6 +58,13 @@ async function migrateV6(env) {
       `UPDATE users SET role = 'owner' WHERE id = (SELECT id FROM users ORDER BY created_at LIMIT 1)`,
     ).run();
   }
+  // Fresh databases (or one where the owner was removed) must always have an owner.
+  const owner = await env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE role = 'owner'`).first();
+  if (!owner || !owner.n) {
+    await env.DB.prepare(
+      `UPDATE users SET role = 'owner' WHERE id = (SELECT id FROM users ORDER BY created_at LIMIT 1)`,
+    ).run();
+  }
 }
 
 async function migrateSpaces(env) {
@@ -199,12 +206,23 @@ export async function createUser(env, name, pin) {
   const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
   const hash = await derivePin(pin, salt, PBKDF2_ITERATIONS);
   const id = crypto.randomUUID();
+  // The account that sets up the household owns it; later accounts are members
+  // until an owner invites them.
+  const isFirst = (await countUsers(env)) === 0;
   await env.DB.prepare(
-    `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at, role) VALUES (?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(id, String(name).trim().slice(0, 60) || 'Family', hash, salt, PBKDF2_ITERATIONS, Date.now())
+    .bind(
+      id,
+      String(name).trim().slice(0, 60) || 'Family',
+      hash,
+      salt,
+      PBKDF2_ITERATIONS,
+      Date.now(),
+      isFirst ? 'owner' : 'member',
+    )
     .run();
-  return { id, name };
+  return { id, name, role: isFirst ? 'owner' : 'member' };
 }
 
 export async function verifyPin(env, pin) {
