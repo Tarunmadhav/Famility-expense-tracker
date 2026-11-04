@@ -77,9 +77,35 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # The runner image ships the Android SDK, but not the release keystore. This
+  # job reports whether signing is configured so the signed build is skipped
+  # (never silently debug-signed) until the secrets exist.
+  signing-ready:
+    name: signing-ready
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ] && [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ] \
+             && [ -n "${ANDROID_KEY_ALIAS:-}" ] && [ -n "${ANDROID_KEY_PASSWORD:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Signing configured: the signed release APK will be built." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Signed release skipped: add ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD. See android/SIGNING.md." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build-apk:
     name: build-apk
-    needs: [test, security]
+    needs: [signing-ready, test, security]
+    if: needs.signing-ready.outputs.ready == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -90,10 +116,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-
+      # The SDK ships with ubuntu-latest; setup-android@v3 rejects its bundled
+      # cmdline-tools, so use sdkmanager directly.
       - name: Install SDK platform and build-tools
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
 
       - name: Decode signing keystore into runner temp
         env:
@@ -161,10 +189,10 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-
       - name: Install SDK platform and build-tools
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
 
       # Installable test build. Signed with the throwaway debug key, so it can be
       # sideloaded but never published; the signed release comes from build-apk.
@@ -192,7 +220,8 @@ jobs:
 
   upload:
     name: upload
-    needs: build-apk
+    needs: [signing-ready, build-apk]
+    if: needs.signing-ready.outputs.ready == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
