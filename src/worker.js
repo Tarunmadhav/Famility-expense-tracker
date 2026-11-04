@@ -502,6 +502,38 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true, user }, 200, { 'Set-Cookie': sessionCookie(token, url) });
   }
 
+  if (path === '/api/auth/reset' && method === 'POST') {
+    if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    const ip = clientIp(request);
+    if (await isLockedOut(env, ip)) {
+      throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
+    }
+    const body = await readJson(request);
+    const email = normaliseEmail(body.email);
+    if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email address');
+    if (!isStrongPassword(body.password)) throw new HttpError(400, 'Password needs at least 8 characters with a letter and a number');
+    const pin = String(body.pin || '');
+    if (!PIN_RE.test(pin)) {
+      await recordAuthFailure(env, ip);
+      throw new HttpError(401, 'Invalid PIN');
+    }
+    const pinUser = await verifyPin(env, pin);
+    if (!pinUser) {
+      await recordAuthFailure(env, ip);
+      throw new HttpError(401, 'Invalid PIN or email');
+    }
+    const creds = await credentialsFor(env, pinUser.id);
+    if (!creds || normaliseEmail(creds.email) !== email) {
+      await recordAuthFailure(env, ip);
+      throw new HttpError(401, 'Invalid PIN or email');
+    }
+    await setPassword(env, pinUser.id, email, String(body.password));
+    await deleteUserSessions(env, pinUser.id);
+    await clearAuthFailures(env, ip);
+    await audit(env, { action: 'auth.password_reset', actor: pinUser.id });
+    return json({ ok: true });
+  }
+
   if (path === '/api/auth/logout' && method === 'POST') {
     if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
     const session = await getSession(env, readCookie(request, COOKIE));

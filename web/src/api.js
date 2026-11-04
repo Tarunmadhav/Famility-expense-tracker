@@ -59,6 +59,7 @@ export const getState = (since = 0) => request(`/api/state?since=${encodeURIComp
 export const authStatus = () => request('/api/auth/status');
 export const login = (payload) => request('/api/auth/login', { method: 'POST', body: payload });
 export const signup = (name, email, password, code) => request('/api/auth/signup', { method: 'POST', body: { name, email, password, code } });
+export const resetPassword = (email, pin, password) => request('/api/auth/reset', { method: 'POST', body: { email, pin, password } });
 export const lockSession = () => request('/api/auth/lock', { method: 'POST' });
 export const setPassword = (current, next, email) => request('/api/auth/password', { method: 'POST', body: { current, next, email } });
 export const account = () => request('/api/auth/account');

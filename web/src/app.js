@@ -35,6 +35,7 @@ S.account = {};
 S.members = [];
 S.invite = null;
 S.authView = 'login';
+S.authMode = 'login';
 let events = null;
 let pollTimer = null;
 let deferredPrompt = null;
@@ -126,10 +127,12 @@ function render() {
       app().innerHTML = '<div class="auth"><div class="authcard"><div class="brand"><span class="logo">₹</span><div><h1>Family Finance Planner</h1><div class="mut">Connecting…</div></div></div></div></div>';
       return;
     }
-    app().innerHTML = views.authShell(
-      S.authView === 'signup' ? views.signupFormHtml(S.error) : views.loginFormHtml(S.error),
-    );
-    const first = document.getElementById(S.authView === 'signup' ? 'su_name' : 'email') || document.getElementById('pin');
+    let formHtml;
+    if (S.authView === 'forgot') formHtml = views.forgotFormHtml(S.error);
+    else if (S.authView === 'signup') formHtml = views.signupFormHtml(S.error);
+    else formHtml = views.loginFormHtml(S.error);
+    app().innerHTML = views.authShell(formHtml);
+    const first = document.getElementById(S.authView === 'signup' ? 'su_name' : S.authView === 'forgot' ? 'fp_email' : 'email') || document.getElementById('pin');
     if (first) first.focus();
     return;
   }
@@ -670,7 +673,16 @@ document.addEventListener('click', async (event) => {
       S.authView = 'signup';
       S.error = '';
       return render();
+    case 'tosignup':
+      S.authView = 'signup';
+      S.error = '';
+      return render();
+    case 'forgot':
+      S.authView = 'forgot';
+      S.error = '';
+      return render();
     case 'tosignin':
+    case 'back-to-login':
       S.authView = 'login';
       S.error = '';
       return render();
@@ -834,44 +846,57 @@ document.addEventListener('change', async (event) => {
     S.page[key] = 0;
   }
   render();
-});
-
-document.addEventListener('submit', async (event) => {
-  const form = event.target;
-  if (form.id === 'loginfrm') {
-    event.preventDefault();
-    const email = document.getElementById('email').value.trim();
-    const password = document.getElementById('password').value;
-    if (!email || !password) return toast('Enter your email and password');
-    await guard(async () => {
-      await api.login({ email, password });
-      S.error = '';
-      await loadApp();
-    }, 'Email or password is incorrect');
-  } else if (form.id === 'pinfrm') {
-    event.preventDefault();
-    const pin = document.getElementById('pin').value.trim();
-    if (!pin) return toast('Enter the family PIN');
-    await guard(async () => {
-      await api.login({ pin });
-      S.error = '';
-      await loadApp();
-    }, 'Incorrect PIN');
-  } else if (form.id === 'signupfrm') {
-    event.preventDefault();
-    const name = document.getElementById('su_name').value.trim();
-    const email = document.getElementById('su_email').value.trim();
-    const password = document.getElementById('su_password').value;
-    const again = document.getElementById('su_password2').value;
-    const code = document.getElementById('su_code').value.trim();
-    if (password !== again) return toast('The two passwords do not match');
-    await guard(async () => {
-      await api.signup(name, email, password, code);
-      S.error = '';
-      await loadApp();
-      toast('Account created');
-    });
-  } else if (form.id === 'setupfrm') {
+});  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (form.id === 'loginfrm') {
+      event.preventDefault();
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      if (!email || !password) return toast('Enter your email and password');
+      await guard(async () => {
+        await api.login({ email, password });
+        S.error = '';
+        await loadApp();
+      }, 'Email or password is incorrect');
+    } else if (form.id === 'pinfrm') {
+      event.preventDefault();
+      const pin = document.getElementById('pin').value.trim();
+      if (!pin) return toast('Enter the family PIN');
+      await guard(async () => {
+        await api.login({ pin });
+        S.error = '';
+        await loadApp();
+      }, 'Incorrect PIN');
+    } else if (form.id === 'forgotfrm') {
+      event.preventDefault();
+      const email = document.getElementById('fp_email').value.trim();
+      const pin = document.getElementById('fp_pin').value.trim();
+      const password = document.getElementById('fp_newpass').value;
+      const again = document.getElementById('fp_newpass2').value;
+      if (!email || !pin) return toast('Enter your email and family PIN');
+      if (password !== again) return toast('The two passwords do not match');
+      await guard(async () => {
+        await api.resetPassword(email, pin, password);
+        S.error = '';
+        S.authView = 'login';
+        toast('Password reset. Sign in with your new password.');
+        render();
+      });
+    } else if (form.id === 'signupfrm') {
+      event.preventDefault();
+      const name = document.getElementById('su_name').value.trim();
+      const email = document.getElementById('su_email').value.trim();
+      const password = document.getElementById('su_password').value;
+      const again = document.getElementById('su_password2').value;
+      const code = document.getElementById('su_code').value.trim();
+      if (password !== again) return toast('The two passwords do not match');
+      await guard(async () => {
+        await api.signup(name, email, password, code);
+        S.error = '';
+        await loadApp();
+        toast('Account created');
+      });
+    } else if (form.id === 'setupfrm') {
     event.preventDefault();
     const household = document.getElementById('household').value.trim() || 'Family Planner';
     const pin = document.getElementById('pin').value.trim();

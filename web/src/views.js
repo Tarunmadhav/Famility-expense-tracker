@@ -444,12 +444,26 @@ export function loginFormHtml(message = '') {
     <form id="loginfrm">
       <div class="fld"><label for="email">Email</label><input id="email" type="email" autocomplete="username" placeholder="you@example.com"></div>
       <div class="fld"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+      <div style="text-align:right;margin-top:-6px;margin-bottom:8px"><button type="button" class="linkbtn" data-act="forgot">Forgot password?</button></div>
       <button class="btn wide">Sign in</button>
     </form>
     <div class="divider"><span>or unlock with the family PIN</span></div>
     <form id="pinfrm"><div class="fld"><label for="pin">Family PIN</label><input id="pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="12" placeholder="••••"></div>
       <button class="btn g wide">Unlock with PIN</button></form>
-    <p class="authswitch"><button class="linkbtn" data-act="signup">Create a member account</button></p>`;
+    <p class="authswitch"><button class="linkbtn" data-act="signup">Create new account</button> · <button class="linkbtn" data-act="signup">Sign up</button></p>`;
+}
+
+export function forgotFormHtml(message = '') {
+  return `${message ? `<div class="alerts">${esc(message)}</div>` : ''}
+    <form id="forgotfrm">
+      <p class="mut" style="margin-top:0">Reset your password using the family PIN or recover access.</p>
+      <div class="fld"><label for="fp_email">Email</label><input id="fp_email" type="email" autocomplete="username" placeholder="you@example.com" required></div>
+      <div class="fld"><label for="fp_pin">Family PIN</label><input id="fp_pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="••••" required></div>
+      <div class="fld"><label for="fp_newpass">New password</label><input id="fp_newpass" type="password" autocomplete="new-password" placeholder="At least 8 characters, letters and numbers" required></div>
+      <div class="fld"><label for="fp_newpass2">Repeat new password</label><input id="fp_newpass2" type="password" autocomplete="new-password" required></div>
+      <button class="btn wide">Reset password</button>
+    </form>
+    <p class="authswitch"><button class="linkbtn" data-act="tosignin">Back to sign in</button></p>`;
 }
 
 export function signupFormHtml(message = '') {
