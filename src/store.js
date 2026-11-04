@@ -5,8 +5,10 @@ import { COLLECTIONS, COLLECTION_NAMES, sanitizeDoc } from '../web/src/entities.
 import { SEED, SETTINGS } from './seed.js';
 import { generateVapidKeys, sendPushToAll } from './push.js';
 import { protectDoc, revealDoc, encryptionReady } from './fieldcrypto.js';
+import { HttpError } from './errors.js';
+import { ensureProfiles, spaceForProfile } from './profiles.js';
 
-export const SCHEMA_VERSION = '8';
+export const SCHEMA_VERSION = '9';
 // 100 000 is the maximum iteration count the production Workers runtime supports
 // for PBKDF2-SHA256; attempts are additionally rate limited (8 per 15 minutes per IP).
 const PBKDF2_ITERATIONS = 100000;
@@ -25,15 +27,22 @@ const STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS changes_space_idx ON changes (space, seq)`,
   `CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, space TEXT NOT NULL DEFAULT 'family', type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', collection TEXT, record_id TEXT, created_at INTEGER NOT NULL, read_at INTEGER, dedupe TEXT UNIQUE)`,
   `CREATE INDEX IF NOT EXISTS notifications_created_idx ON notifications (space, created_at DESC)`,
-  `CREATE TABLE IF NOT EXISTS push_subs (id TEXT PRIMARY KEY, endpoint TEXT UNIQUE NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL, ua TEXT)`,
+  `CREATE TABLE IF NOT EXISTS push_subs (id TEXT PRIMARY KEY, endpoint TEXT UNIQUE NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL, ua TEXT, user_id TEXT)`,
   `CREATE TABLE IF NOT EXISTS auth_fails (ip TEXT NOT NULL, ts INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS auth_fails_idx ON auth_fails (ip, ts)`,
   `CREATE TABLE IF NOT EXISTS credentials (user_id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, password_salt TEXT, iterations INTEGER, created_at INTEGER)`,
   `CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, space TEXT NOT NULL DEFAULT 'family', name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, key TEXT UNIQUE NOT NULL, collection TEXT, record_id TEXT, uploaded_by TEXT, created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS files_created_idx ON files (space, created_at DESC)`,
-  `CREATE TABLE IF NOT EXISTS ai_connections (id TEXT PRIMARY KEY, provider TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL, api_key TEXT NOT NULL, created_by TEXT, created_at INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS ai_connections (id TEXT PRIMARY KEY, provider TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL, api_key TEXT NOT NULL, created_by TEXT, created_at INTEGER NOT NULL, profile_id TEXT)`,
   `CREATE TABLE IF NOT EXISTS family_invites (code TEXT PRIMARY KEY, created_by TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', expires_at INTEGER NOT NULL, used_by TEXT, used_at INTEGER)`,
   `CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, hits INTEGER NOT NULL DEFAULT 0)`,
+  // v9: profiles, per-profile roles and the security audit trail.
+  `CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'family', name TEXT NOT NULL, owner_id TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS profile_members (profile_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'editor', created_at INTEGER NOT NULL, PRIMARY KEY (profile_id, user_id))`,
+  `CREATE INDEX IF NOT EXISTS profile_members_user_idx ON profile_members (user_id)`,
+  `CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT, profile_id TEXT, action TEXT NOT NULL, target TEXT, detail TEXT)`,
+  `CREATE INDEX IF NOT EXISTS audit_log_ts_idx ON audit_log (ts DESC)`,
+  `CREATE INDEX IF NOT EXISTS audit_log_profile_idx ON audit_log (profile_id, ts DESC)`,
 ];
 
 let schemaReady = false;
@@ -128,8 +137,29 @@ export async function ensureSchema(env) {
   // v5 adds personal/family spaces. The migration is additive: existing rows are
   // kept and assigned to the family book, so deploying never destroys user data.
   await migrateSpaces(env);
-  for (const sql of STATEMENTS) await env.DB.prepare(sql).run();
+  // One round trip instead of ~30: on a fresh remote D1 every sequential
+  // prepare().run() costs real milliseconds, and this runs on the first request
+  // ever served (which is also the setup request).
+  await env.DB.batch(STATEMENTS.map((sql) => env.DB.prepare(sql)));
   await migrateV6(env);
+  // v9 often lands on a database created by v8, so the new columns are added
+  // defensively before any query can depend on them.
+  for (const [table, column, ddl] of [
+    ['push_subs', 'user_id', 'ALTER TABLE push_subs ADD COLUMN user_id TEXT'],
+    ['ai_connections', 'profile_id', 'ALTER TABLE ai_connections ADD COLUMN profile_id TEXT'],
+  ]) {
+    if (!(await hasColumn(env, table, column))) {
+      try {
+        await env.DB.prepare(ddl).run();
+      } catch {
+        /* table or column already in the right shape */
+      }
+    }
+  }
+  // v9: give every existing account a personal + office profile and the family
+  // profile of its household. Additive and idempotent, so a deploy never locks
+  // anyone out of data they could already read.
+  await ensureProfiles(env);
   await env.DB.prepare(
     `INSERT INTO meta (k, v) VALUES ('schema', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
   )
@@ -239,6 +269,7 @@ export async function createUser(env, name, pin) {
       isFirst ? 'owner' : 'member',
     )
     .run();
+  await ensureProfiles(env);
   return { id, name, role: isFirst ? 'owner' : 'member' };
 }
 
@@ -292,6 +323,8 @@ export async function createEmailUser(env, email, password, name, household = nu
       `INSERT INTO credentials (user_id, email, password_hash, password_salt, iterations, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
     ).bind(userId, clean, hash, salt, PBKDF2_ITERATIONS, Date.now()),
   ]);
+  // Personal, office and (joined or new) family profiles for the new account.
+  await ensureProfiles(env);
   return { id: userId, name: displayName, email: clean, household: home, role };
 }
 
@@ -380,19 +413,47 @@ export async function redeemInvite(env, code, userId) {
   return row;
 }
 
-/** Removing a member also deletes their personal and office books and their sessions. */
-export async function removeMember(env, userId, household = null) {
+/**
+ * Removing a member deletes their private books, documents, memberships and
+ * sessions. The household book's records are untouched because they are shared.
+ */
+export async function removeMember(env, userId, household = null, actorId = null) {
   if (household) {
     const target = await env.DB.prepare(`SELECT household FROM users WHERE id = ?`).bind(userId).first();
     if (!target || (target.household || 'family') !== household) throw new HttpError(404, 'Member not found');
   }
+  const spaces = [spaceForProfile('personal', userId), spaceForProfile('office', userId)];
+  // Documents are deleted from R2 before their rows disappear, so no orphaned
+  // object survives the account that owned it.
+  if (env.FILES) {
+    try {
+      const rows = await env.DB.prepare(
+        `SELECT key FROM files WHERE space = ? OR space = ?`,
+      ).bind(spaces[0], spaces[1]).all();
+      for (const row of rows.results || []) await env.FILES.delete(row.key);
+    } catch {
+      /* storage best effort */
+    }
+  }
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM credentials WHERE user_id = ?`).bind(userId),
-    env.DB.prepare(`DELETE FROM records WHERE space = ?`).bind(`u:${userId}`),
-    env.DB.prepare(`DELETE FROM records WHERE space = ?`).bind(`o:${userId}`),
+    env.DB.prepare(`DELETE FROM profile_members WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM profiles WHERE owner_id = ? AND kind IN ('personal','office')`).bind(userId),
+    env.DB.prepare(`DELETE FROM records WHERE space = ?`).bind(spaces[0]),
+    env.DB.prepare(`DELETE FROM records WHERE space = ?`).bind(spaces[1]),
+    env.DB.prepare(`DELETE FROM files WHERE space = ?`).bind(spaces[0]),
+    env.DB.prepare(`DELETE FROM files WHERE space = ?`).bind(spaces[1]),
+    env.DB.prepare(`DELETE FROM notifications WHERE space = ?`).bind(spaces[0]),
+    env.DB.prepare(`DELETE FROM notifications WHERE space = ?`).bind(spaces[1]),
     env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(userId),
   ]);
+  if (household) {
+    await env.DB.prepare(`DELETE FROM profile_members WHERE profile_id = ? AND user_id = ?`)
+      .bind(household, userId)
+      .run();
+  }
+  void actorId;
 }
 
 /* ---------------------------------------------------------------- files */
@@ -438,12 +499,16 @@ export async function deleteFileRow(env, id) {
 
 /* ------------------------------------------------------ AI connections */
 
-export async function listAiConnections(env) {
-  const res = await env.DB.prepare(`SELECT id, provider, base_url, model, created_at FROM ai_connections ORDER BY created_at`).all();
+export async function listAiConnections(env, space) {
+  const res = await env.DB.prepare(
+    `SELECT id, provider, base_url, model, created_at FROM ai_connections WHERE profile_id = ? ORDER BY created_at`,
+  )
+    .bind(space)
+    .all();
   return res.results || [];
 }
 
-export async function addAiConnection(env, input, userId) {
+export async function addAiConnection(env, input, userId, space) {
   const provider = String(input.provider || '').trim().slice(0, 40) || 'Custom';
   const baseUrl = String(input.baseUrl || '').trim().replace(/\/+$/, '').slice(0, 200);
   const model = String(input.model || '').trim().slice(0, 80);
@@ -454,19 +519,23 @@ export async function addAiConnection(env, input, userId) {
   if (apiKey.length < 8) throw new HttpError(400, 'API key looks too short');
   const id = crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO ai_connections (id, provider, base_url, model, api_key, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO ai_connections (id, provider, base_url, model, api_key, created_by, created_at, profile_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(id, provider, baseUrl, model, apiKey, userId || null, Date.now())
+    .bind(id, provider, baseUrl, model, apiKey, userId || null, Date.now(), space || 'family')
     .run();
   return { id, provider, base_url: baseUrl, model };
 }
 
-export async function deleteAiConnection(env, id) {
-  await env.DB.prepare(`DELETE FROM ai_connections WHERE id = ?`).bind(String(id)).run();
+export async function deleteAiConnection(env, id, space) {
+  await env.DB.prepare(`DELETE FROM ai_connections WHERE id = ? AND profile_id = ?`)
+    .bind(String(id), space)
+    .run();
 }
 
-export async function activeAiConnection(env) {
-  return env.DB.prepare(`SELECT * FROM ai_connections ORDER BY created_at DESC LIMIT 1`).first();
+export async function activeAiConnection(env, space = 'family') {
+  return env.DB.prepare(`SELECT * FROM ai_connections WHERE profile_id = ? ORDER BY created_at DESC LIMIT 1`)
+    .bind(space)
+    .first();
 }
 
 export async function createSession(env, userId, request) {
@@ -763,7 +832,7 @@ export async function getState(env, since, space = 'family') {
   const [headRes, floorRes, settingsRes, vapidRes, notesRes, unreadRes] = await env.DB.batch([
     env.DB.prepare(`SELECT COALESCE(MAX(seq), 0) AS rev FROM changes WHERE space = ?`).bind(space),
     env.DB.prepare(`SELECT v FROM meta WHERE k = 'floor'`),
-    env.DB.prepare(`SELECT v FROM meta WHERE k = 'settings'`),
+    env.DB.prepare(`SELECT k, v FROM meta WHERE k = 'settings' OR k = ?`).bind(`settings:${space}`),
     env.DB.prepare(`SELECT v FROM meta WHERE k = 'vapid'`),
     env.DB.prepare(`SELECT * FROM notifications WHERE space = ? ORDER BY created_at DESC LIMIT 40`).bind(space),
     env.DB.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE space = ? AND read_at IS NULL`).bind(space),
@@ -783,7 +852,13 @@ export async function getState(env, since, space = 'family') {
   const rev = head ? head.rev : 0;
   const floor = Number(parseMeta(first(floorRes), 0)) || 0;
   const full = !since || since <= 0 || since < floor;
-  const settings = parseMeta(first(settingsRes), SETTINGS);
+  // A profile's own settings win; the household row is the legacy fallback.
+  const settingsRows = (settingsRes && settingsRes.results) || [];
+  const settingsRow =
+    settingsRows.find((r) => r.k === `settings:${space}`) ||
+    settingsRows.find((r) => r.k === 'settings') ||
+    null;
+  const settings = parseMeta(settingsRow, SETTINGS);
   const vapid = parseMeta(first(vapidRes), null);
   const notifications = notesRes && notesRes.results ? notesRes.results : [];
   const unreadRow = first(unreadRes);
@@ -866,6 +941,19 @@ export async function listNotifications(env, space, limit = 40) {
   return res.results || [];
 }
 
+/** Notification inbox spanning every profile the account can read. */
+export async function listNotificationsAcross(env, profileIds, limit = 80) {
+  const ids = (profileIds || []).filter(Boolean);
+  if (!ids.length) return [];
+  const holes = ids.map(() => '?').join(',');
+  const res = await env.DB.prepare(
+    `SELECT * FROM notifications WHERE space IN (${holes}) ORDER BY created_at DESC LIMIT ?`,
+  )
+    .bind(...ids, Math.min(Math.max(Number(limit) || 80, 1), 200))
+    .all();
+  return res.results || [];
+}
+
 export async function countUnread(env, space) {
   const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE space = ? AND read_at IS NULL`)
     .bind(space)
@@ -914,7 +1002,15 @@ export async function addNotification(env, n) {
   const created = res.meta && res.meta.changes > 0;
   if (!created) return null;
   await logChange(env, space, 'notifications', id, 'notify', 'system');
-  return { id, type: n.type, title: n.title, body: n.body, level: n.level || 'info', createdAt: Date.now() };
+  return {
+    id,
+    space,
+    type: n.type,
+    title: n.title,
+    body: n.body,
+    level: n.level || 'info',
+    createdAt: Date.now(),
+  };
 }
 
 /** Domain events: bill due, renewal, task, birthday, budget drift. */
@@ -1052,18 +1148,74 @@ async function afterWrite(env, space, collection, doc, id) {
 /* --------------------------------------------------------------- seeding */
 
 export async function seedDatabase(env, actor = 'system', space = 'family') {
-  for (const name of Object.keys(SEED)) {
-    if (!COLLECTIONS[name]) continue;
-    const rows = SEED[name];
-    for (const row of rows) await createRecord(env, space, name, row, actor);
+  // Build every row in memory, then write them in a few batched statements.
+  // The row-at-a-time version needed ~150 sequential D1 round trips, which made
+  // the very first setup request outlive the browser's patience on a cold remote
+  // database. Same rows, same ids, ~4 round trips.
+  const rows = [];
+  let contactSeq = 0;
+  if (SEED.contacts && SEED.contacts.length) {
+    const max = await env.DB.prepare(
+      `SELECT MAX(CAST(SUBSTR(id, 5) AS INTEGER)) AS n FROM records WHERE space = ? AND collection = 'contacts' AND id LIKE 'CNT-%'`,
+    )
+      .bind(space)
+      .first();
+    contactSeq = (max && Number(max.n)) || 0;
   }
-  await setMeta(env, 'settings', SETTINGS);
-  await setMeta(env, 'family_seed', Date.now());
-  familyChecked = true;
+  for (const name of Object.keys(SEED)) {
+    const def = COLLECTIONS[name];
+    if (!def) continue;
+    for (const input of SEED[name]) {
+      const doc = sanitizeDoc(name, input);
+      let id;
+      if (def.autoId) {
+        contactSeq += 1;
+        id = `CNT-${String(contactSeq).padStart(4, '0')}`;
+        doc.id = id;
+      } else {
+        const given = String((input && input.id) || '');
+        id = /^[A-Za-z0-9_-]{1,64}$/.test(given) ? given : crypto.randomUUID();
+      }
+      rows.push({ collection: name, id, doc: JSON.stringify(await protectDoc(env, name, doc)) });
+    }
+  }
+
+  const now = Date.now();
+  // One change row for the whole seed keeps the revision stream cheap; clients
+  // only need to see that the profile moved forward.
+  const rev = await logChange(env, space, 'seed', 'seed', 'upsert', actor);
+  const insert = `INSERT INTO records (space, collection, id, doc, rev, updated_at, updated_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(space, collection, id) DO UPDATE SET doc = excluded.doc, rev = excluded.rev,
+     updated_at = excluded.updated_at, updated_by = excluded.updated_by`;
+  for (let i = 0; i < rows.length; i += 50) {
+    await env.DB.batch(
+      rows
+        .slice(i, i + 50)
+        .map((row) => env.DB.prepare(insert).bind(space, row.collection, row.id, row.doc, rev, now, actor || 'system')),
+    );
+  }
+
+  // Settings are per profile, but the bare key is kept so an older client (and
+  // the export format) still sees the same starter values.
+  const meta = [
+    ['settings', SETTINGS],
+    [`settings:${space}`, SETTINGS],
+    ['family_seed', now],
+    ['seeded', now],
+    ['floor', 0],
+  ];
   const vapid = await getMeta(env, 'vapid', null);
-  if (!vapid) await setMeta(env, 'vapid', await generateVapidKeys());
-  await setMeta(env, 'seeded', Date.now());
-  await setMeta(env, 'floor', 0);
+  if (!vapid) meta.push(['vapid', await generateVapidKeys()]);
+  await env.DB.batch(
+    meta.map(([k, v]) =>
+      env.DB.prepare(`INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`).bind(
+        k,
+        JSON.stringify(v),
+      ),
+    ),
+  );
+  familyChecked = true;
   await sweep(env, { force: true });
 }
 
@@ -1115,11 +1267,7 @@ export async function hitRateLimit(env, key, limit, windowMs) {
 
 /* ------------------------------------------------------------- http error */
 
-export class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+// Re-exported so existing imports of HttpError from the store keep working.
+export { HttpError } from './errors.js';
 
 export { parseDocs };

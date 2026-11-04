@@ -15,6 +15,11 @@ AJAR="${PLATFORM}android.jar"
 OUT="$ROOT/android/build"
 MANIFEST="$ROOT/android/app/src/main/AndroidManifest.xml"
 SRC="$ROOT/android/app/src/main/java"
+# The version lives in gradle.properties; reading it here keeps the shell build and
+# a Gradle build of the same source at the same version instead of drifting.
+VERSION_CODE="$(sed -n 's/^versionCode=//p' "$ROOT/android/gradle.properties" | tr -d '\r' | head -1)"
+VERSION_NAME="$(sed -n 's/^versionName=//p' "$ROOT/android/gradle.properties" | tr -d '\r' | head -1)"
+: "${VERSION_CODE:=1}" "${VERSION_NAME:=1.0}"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex" "$ROOT/android/app/src/main/res/mipmap-xxxhdpi"
@@ -47,7 +52,13 @@ APKSIGNER="$(tool apksigner)"
   --java "$OUT/gen" \
   --min-sdk-version 26 \
   --target-sdk-version 35 \
-  --version-code 1 --version-name 2.0
+  --version-code "$VERSION_CODE" --version-name "$VERSION_NAME"
+
+# Gradle normally generates BuildConfig from plannerApiBaseUrl. This path has no
+# Gradle, so emit the same class here or MainActivity cannot resolve START_URL.
+PLANNER_URL="$(sed -n 's/^plannerApiBaseUrl=//p' "$ROOT/android/gradle.properties" | tr -d '\r' | head -1)"
+: "${PLANNER_URL:=https://family-finance-planner.tarungudipatimadhav.workers.dev/}"
+printf 'package com.family.planner;\n\npublic final class BuildConfig {\n  public static final String PLANNER_URL = "%s";\n}\n' "$PLANNER_URL" > "$OUT/gen/com/family/planner/BuildConfig.java"
 
 GEN_FILES=()
 while IFS= read -r file; do GEN_FILES+=("$file"); done < <(find "$OUT/gen" -name '*.java')
@@ -77,4 +88,9 @@ fi
   --out "$ROOT/android/FamilyPlanner.apk" "$OUT/app-aligned.apk"
 
 "$APKSIGNER" verify --print-certs "$ROOT/android/FamilyPlanner.apk" | head -4
-echo "APK: $ROOT/android/FamilyPlanner.apk ($(du -h "$ROOT/android/FamilyPlanner.apk" | cut -f1))"
+
+# Publish the build next to the web app so /api/version can point at a real file.
+mkdir -p "$ROOT/web/public/download"
+cp "$ROOT/android/FamilyPlanner.apk" "$ROOT/web/public/download/family-planner-$VERSION_NAME.apk"
+echo "APK: $ROOT/android/FamilyPlanner.apk ($(du -h "$ROOT/android/FamilyPlanner.apk" | cut -f1)) v$VERSION_NAME ($VERSION_CODE)"
+echo "Served at: /download/family-planner-$VERSION_NAME.apk";

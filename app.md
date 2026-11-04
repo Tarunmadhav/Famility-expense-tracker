@@ -19,10 +19,10 @@ bottom before running a command.
 | File storage | Cloudflare **R2** (binding `FILES`) | Bills, policies and documents you upload |
 | Field encryption | secret `FIELD_KEY` | AES-256-GCM for account numbers, policy numbers, etc. |
 | Android app | `android/` | Thin WebView shell + native notifications |
-| Deploy config | `deploy.json` | Manifest used by Cloudflare Sites |
+| Deploy config | `wrangler.jsonc` | Worker + D1 + assets for your Cloudflare account (`deploy.json` is the legacy Sites manifest) |
 
-**Live site:** https://site-0f6d51dc534d4dd4af419f3a4cf5f0ad.freebuff.page
-**Preview site:** https://site-d5cebd755082457297c63980e1b24526.freebuff.page
+**Live site:** https://family-finance-planner.tarungudipatimadhav.workers.dev
+**Preview site:** same Worker (there is no separate preview environment on a plain account)
 **Android package:** `com.family.planner` — versionName `2.0`, versionCode `1`
 
 The Android app does not contain the website. It opens the live URL in a WebView, so

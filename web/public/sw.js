@@ -1,6 +1,8 @@
 /* Family Finance Planner service worker: offline shell + push notifications. */
 
-const CACHE = 'ffp-shell-v1';
+// Bumped when the shell contract changes: activation deletes every older cache,
+// so a phone that kept the previous build cannot serve stale HTML or bundles.
+const CACHE = 'ffp-shell-v2';
 const SHELL = ['/', '/index.html', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -49,6 +51,15 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
+// The profile the user is currently looking at, so a notification for a
+// different profile can stay generic instead of putting another profile's
+// amounts on a lock screen.
+let activeProfile = '';
+self.addEventListener('message', (event) => {
+  const data = event.data || {};
+  if (data.type === 'profile' && typeof data.id === 'string') activeProfile = data.id;
+});
+
 self.addEventListener('push', (event) => {
   let payload = { title: 'Family Finance Planner', body: 'You have a new alert.' };
   try {
@@ -56,14 +67,21 @@ self.addEventListener('push', (event) => {
   } catch {
     if (event.data) payload.body = event.data.text();
   }
+  const otherProfile = payload.profile && activeProfile && payload.profile !== activeProfile;
+  const title = payload.title;
+  const body = otherProfile
+    ? `New ${payload.level === 'high' ? 'urgent ' : ''}update in ${
+        String(payload.profileName || 'another profile')
+      }`
+    : payload.body;
   event.waitUntil(
-    self.registration.showNotification(payload.title, {
-      body: payload.body,
+    self.registration.showNotification(title, {
+      body,
       icon: '/icon-192.png',
       badge: '/icon-192.png',
       tag: payload.tag || 'planner',
       renotify: true,
-      data: { url: payload.url || '/' },
+      data: { url: payload.url || '/', profile: payload.profile || '' },
       vibrate: payload.level === 'high' ? [180, 80, 180] : [120],
     }),
   );

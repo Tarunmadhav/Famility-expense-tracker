@@ -8,21 +8,32 @@ export class ApiError extends Error {
 }
 
 let space = 'family';
+let profile = '';
 
 /** 'family' shares the household book; 'personal' is private to the signed-in account. */
 export function setSpace(value) {
   space = value === 'personal' || value === 'office' ? value : 'family';
 }
 
+/** The profile id is the real selector; the worker re-checks membership on every call. */
+export function setProfile(id) {
+  profile = String(id || '');
+}
+
 export function currentSpace() {
-  return space;
+  return profile || space;
 }
 
 async function request(path, { method = 'GET', body, headers } = {}) {
   const options = {
     method,
     credentials: 'same-origin',
-    headers: { Accept: 'application/json', 'X-Space': space, ...headers },
+    headers: {
+      Accept: 'application/json',
+      'X-Space': space,
+      ...(profile ? { 'X-Profile': profile } : {}),
+      ...headers,
+    },
   };
   if (body instanceof FormData) {
     options.body = body;
@@ -38,7 +49,7 @@ async function request(path, { method = 'GET', body, headers } = {}) {
   } catch {
     data = null;
   }
-  if (!res.ok) throw new ApiError(res.status, (data && (data.error || data.detail)) || `Request failed (${res.status})`);
+  if (!res.ok) throw new ApiError(res.status, (data && data.error) || `Request failed (${res.status})`);
   return data;
 }
 
@@ -73,7 +84,20 @@ export const revokeAllSessions = () => request('/api/auth/sessions/revoke', { me
 export const createRecord = (collection, doc) => request('/api/records', { method: 'POST', body: { collection, doc } });
 export const updateRecord = (collection, id, doc) => request(`/api/records/${collection}/${encodeURIComponent(id)}`, { method: 'PATCH', body: { doc } });
 export const deleteRecord = (collection, id) => request(`/api/records/${collection}/${encodeURIComponent(id)}`, { method: 'DELETE' });
-export const bulkImport = (collection, docs) => request('/api/records/bulk', { method: 'POST', body: { collection, docs } });
+export const bulkImport = (collection, docs, restore = false) =>
+  request('/api/records/bulk', { method: 'POST', body: { collection, docs, restore } });
+
+export const profiles = () => request('/api/profiles');
+export const switchProfile = (id) => request('/api/profiles/switch', { method: 'POST', body: { profile: id } });
+export const profileMembers = (id) => request(`/api/profiles/${encodeURIComponent(id)}/members`);
+export const setMemberRole = (id, userId, role) =>
+  request(`/api/profiles/${encodeURIComponent(id)}/members/${userId}`, { method: 'PATCH', body: { role } });
+export const auditLog = (limit = 60) => request(`/api/audit?limit=${encodeURIComponent(limit)}`);
+export const inbox = () => request('/api/notifications/all');
+export const version = () => request('/api/version');
+export const backupEvent = (action, target, bytes) =>
+  request('/api/backup', { method: 'POST', body: { action, target, bytes } });
+export const exportProfile = (id) => request('/api/export', { headers: { 'X-Profile': id } });
 
 export const markRead = (ids) => request('/api/notifications/read', { method: 'POST', body: { ids } });
 export const saveSettings = (settings) => request('/api/settings', { method: 'POST', body: settings });
@@ -100,7 +124,9 @@ export function connectEvents({ since, onRev, onStatus }) {
   const open = () => {
     if (closed) return;
     onStatus('connecting');
-    source = new EventSource(`/api/events?since=${encodeURIComponent(since)}&space=${encodeURIComponent(space)}`);
+    source = new EventSource(
+      `/api/events?since=${encodeURIComponent(since)}&profile=${encodeURIComponent(profile || space)}`,
+    );
     source.addEventListener('open', () => {
       retry = 0;
       onStatus('live');

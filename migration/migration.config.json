@@ -5,9 +5,9 @@
   },
   "destination": {
     "workerName": "family-finance-planner",
-    "baseUrl": "",
+    "baseUrl": "https://family-finance-planner.tarungudipatimadhav.workers.dev",
     "d1DatabaseName": "family-planner",
-    "d1DatabaseId": "",
+    "d1DatabaseId": "74d24b62-dbbc-4a8c-92d8-2e54fbb566df",
     "r2BucketName": "family-planner-drive",
     "configFile": "wrangler.production.jsonc"
   },

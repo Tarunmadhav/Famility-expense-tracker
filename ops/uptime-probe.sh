@@ -3,7 +3,7 @@
 # no headers, no cookies, no tokens.
 set -euo pipefail
 
-URL="${URL:-https://site-0f6d51dc534d4dd4af419f3a4cf5f0ad.freebuff.page/api/health}"
+URL="${URL:-https://family-finance-planner.tarungudipatimadhav.workers.dev/api/health}"
 LOG_DIR="${LOG_DIR:-/var/lib/uptime}"
 LOG="$LOG_DIR/probe.log"
 mkdir -p "$LOG_DIR"

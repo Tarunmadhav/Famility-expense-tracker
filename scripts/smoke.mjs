@@ -252,7 +252,9 @@ const dup = await call('/api/auth/signup', { method: 'POST', body: { email: memb
 ok('duplicate email rejected', dup.status === 409, `got ${dup.status}`);
 
 const account = await call('/api/auth/account');
-ok('account reports the member role', account.status === 200 && account.data.role === 'member');
+// Roles are now owner / admin / editor / viewer; an invited household member is
+// an editor (full record access, but no member management or invites).
+ok('account reports the member role', account.status === 200 && account.data.role === 'editor', JSON.stringify(account.data));
 
 // ------------------------------------------------------------ books/spaces
 const pSpace = { 'X-Space': 'personal' };

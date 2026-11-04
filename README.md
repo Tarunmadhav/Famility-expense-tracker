@@ -11,9 +11,13 @@ a real database, live multi-device sync, PIN-protected sessions and push notific
 
 ## Live
 
-* **Website / Android app:** https://site-0f6d51dc534d4dd4af419f3a4cf5f0ad.freebuff.page
-* **Preview:** https://site-d5cebd755082457297c63980e1b24526.freebuff.page
-* **Family PIN:** `135790` — change it in Settings → Security after the first sign-in.
+* **Website / Android app:** https://family-finance-planner.tarungudipatimadhav.workers.dev
+* **Hosting:** your own Cloudflare account (Workers free plan) — Worker `family-finance-planner`,
+  D1 `family-planner` (APAC, region `SIN`), R2 bucket `family-planner-drive` bound as `FILES`.
+  API version **9**, app version **2.1.0** (`GET /api/version`).
+* **Family PIN:** none yet. This deployment starts from an empty database, so the first visit asks
+  you to create the household and choose the PIN.
+* The previous deployment at `site-0f6d51dc…freebuff.page` is untouched and still holds the old data.
 
 ## What is in the box
 
@@ -31,6 +35,10 @@ a real database, live multi-device sync, PIN-protected sessions and push notific
 | Bill scanning | Upload a receipt, the configured vision model fills in date, merchant, amount, category |
 | AI tools | Connect any OpenAI-compatible provider; keys stay server-side and are never returned |
 | Security | PIN/password auth, hashed session tokens, HttpOnly cookies, CSP, origin checks, rate limiting |
+| Profiles | Family, Office and Personal profiles per account, switched without signing out |
+| Roles | Owner / Admin / Editor / Viewer, enforced on the server for every route |
+| Audit trail | Sign-ins, failed sign-ins, profile switches, sharing, role changes, exports, deletions |
+| Backups | AES-256-GCM encrypted backups made in the browser, with validated restore |
 
 ## Analytics (all preserved from the reference app)
 
@@ -124,15 +132,24 @@ prompt to verify the connection.
 
 ## Books, membership and locking
 
-**Three books per account.** `family` is the shared household book; `personal` and `office` are
-private to the signed-in user. The server maps the `X-Space` header to `family`, `u:<userId>` or
-`o:<userId>` and every query filters on that column — a book cannot read, edit or delete another
-book's rows or files, even with a hand-crafted request. The Office book deliberately exposes only
-tasks/notes, contacts, expenses and files.
+**Three profiles per account.** Every account owns a private `personal` and `office` profile and
+belongs to the `family` profile of its household. A profile id **is** the storage namespace
+(`family` or `h:<owner>`, `u:<userId>`, `o:<userId>`), so every existing query stays scoped exactly as
+before. The client names the profile it wants (`X-Profile`, or `?profile=` for the event stream) and
+the Worker proves membership in `profile_members` on every single request: a forged, guessed or
+foreign profile id answers **404**, never data. The Office profile deliberately exposes only tasks,
+contacts, expenses, budgets and files.
 
-**Membership.** The first account is the household owner. New accounts need a one-time invite code
-(Settings → Family members, 72 hours, single use); the owner can remove a member, which deletes their
-personal and office books, credentials and sessions. Members cannot invite or remove anyone.
+**Roles.** `owner` (everything, including invites), `admin` (records, settings and members),
+`editor` (view, add, edit, delete, export) and `viewer` (view and export only). The mapping lives in
+one function, `permissionFor()` in `src/worker.js`, so a new route cannot ship without an
+access check. Accounts that were plain household "members" before roles existed become `editors`,
+keeping their previous abilities without gaining member management.
+
+**Membership.** The first account owns the household. New accounts need a one-time invite code
+(Settings → People with access, 72 hours, single use). Removing a member deletes their private
+profiles, documents (rows and R2 objects), credentials and sessions, and touches nothing in the
+shared family profile.
 
 **Auto-lock.** Inactivity locks the screen after 30 s / 1 min / 5 min / 15 min or a custom timeout.
 Locking calls `POST /api/auth/lock`, which deletes the session row and clears the cookie, so a copied
@@ -144,6 +161,26 @@ cover tab switches and device sleep.
 loans, subscriptions and diary entries are sealed with AES-256-GCM before they reach D1, using the
 `FIELD_KEY` Worker secret (32 random bytes, base64). Values written before the key existed stay
 readable, and if the key is missing the app keeps working in plaintext rather than corrupting data.
+
+## Backups, versions and updates
+
+**Encrypted backups.** Settings → Backup & restore exports only the profile you are in. The browser
+seals it with AES-256-GCM under a key derived from a passphrase you type (PBKDF2-SHA-256, 210 000
+iterations, random salt per backup). The passphrase and key never leave the device, so the file is
+readable only by someone who knows the passphrase — safe to park in Google Drive, OneDrive or a USB
+stick. Restore decrypts locally, proves the file is authentic (a tampered or wrong-passphrase file
+fails the GCM check), shows the date and record count, asks for confirmation, then merges by id
+without wiping the profile first.
+
+**Versions.** `GET /api/version` returns the app version, API version and an optional `release`
+object (`version`, `minimum`, `notes`, `apkUrl`, `apkSha256`) stored in D1 `meta`. When `minimum` is
+higher than the running client, the web app shows an update banner. Nothing is served from that
+object that the app trusts for security; it only drives the notice.
+
+**Frontend updates need no reinstall.** The Worker serves the newest build and the service worker
+fetches navigations network-first with a versioned cache name (`ffp-shell-v2`), so a phone picks up a
+new bundle on the next launch while hashed assets stay immutably cached. Only changes to the native
+Android shell itself need a new APK install.
 
 ## Performance
 
@@ -169,6 +206,31 @@ diff) instead of six sequential queries, and live updates reuse the same diff pa
 * Password reset is deliberately "reset the database" — there is no email dependency to attack
 * Personal address books are **not** bundled in the source; import your own CSV
 
+## Security audit (what is enforced where)
+
+Every item below is enforced by the Worker, not by the browser. `scripts/security-test.mjs` proves the
+interesting half of it on a throwaway database, and the suite is the thing to rerun after any change
+(46 checks, including forged profile ids, cross-account file reads and privilege-escalation attempts).
+
+| Requirement | How it is met |
+| --- | --- |
+| No secrets in frontend code | The SPA bundle contains no keys. `FIELD_KEY`, VAPID private key and stored AI keys live only in the Worker env / D1 and are never serialised to a client (`apiKey` is stripped on read). `grep` of `dist/` finds no key material. |
+| `.env` never public | `.env`, `.env.*`, `.dev.vars`, `.secrets/`, `*.jks`, `*.keystore`, `keystore.properties`, `migration/out/` and `*.apk` (except the published build) are git-ignored; only `web/public/**` is shipped, and it contains no env file. |
+| Server-side authentication | Sessions are `HttpOnly` cookies holding 32 random bytes; only their SHA-256 hash is stored. Every route outside `/api/health`, `/api/version`, `/api/auth/*` and `/api/push/*` requires a live session row, checked before the handler runs. |
+| IDOR | Record ids, file ids, profile ids and member ids from the client are re-resolved server-side. A profile id must exist in `profile_members` for the caller (otherwise **404**, not 403, so ids cannot be probed); a file id must belong to the caller's profile; member rows must belong to the profile being managed. |
+| Row-level security | D1 has no RLS, so the equivalent is structural: every query in `src/store.js` is bound to a `space` argument, `resolveProfile()` is the single gate that decides it, and the tables have no cross-profile foreign reads. This is asserted by tests that read another household's ids directly. |
+| Admin endpoints | There are no hidden admin pages; `/api/admin/*` (reset, clear, sample) requires the `manage` permission on the resolved profile, which only owner/admin hold. The migration snapshot additionally requires the `owner` role **and** the `MIGRATION_MODE=1` env flag, otherwise it is a 404. |
+| HTTPS | Plain-HTTP requests are answered with a `308` to the HTTPS URL (loopback exempted for local dev), the session cookie is `Secure` on any non-localhost host, and `Strict-Transport-Security: max-age=31536000; includeSubDomains` is set on every response. |
+| Input validation | Bodies must be `application/json` (≤ 4 MB) or a multipart upload (≤ 8 MB, magic-byte sniffed to JPEG/PNG/WebP/PDF); collections are allow-listed; ids are pattern-checked; every stored field is coerced through `sanitizeDoc()` with length caps and unknown keys dropped. |
+| Password hashing | PBKDF2-SHA-256, per-user random salt, 100 000 iterations, constant-time compare. The iteration count is stored per credential row, so a future increase can be applied on next login. 100 000 is the ceiling that keeps a login inside the free plan's per-request CPU budget on real hardware; the extra hardening is the 8-attempts-per-15-minutes lockout per IP. |
+| SQL injection | All SQL uses bound parameters. The only interpolated identifiers are internal table/column names from hard-coded lists, never request data. |
+| XSS | The CSP forbids inline and remote scripts (`script-src 'self'`), and every value rendered into HTML passes through `esc()`; the audit found and fixed one unescaped chart label. Toasts and file names use `textContent`. |
+| CSRF | Every non-GET request must be same-origin: `Origin` must match the request host, or `Sec-Fetch-Site` must be `same-origin`/`none`. A cross-site POST is rejected with 403 before any handler. |
+| Least privilege | Four roles with an explicit permission table; `permissionFor()` maps each route to a permission and is the only place that decides, so an unmapped route still has a default. Viewers cannot write, upload, change settings, invite, read audit or change the household PIN. |
+| No internal errors leaked | Unexpected failures return `{"error":"Unexpected server error"}` with no SQL text, stack or binding names; diagnostics go to the Worker log (`console.error`). |
+| Rate limiting | Login/signup: 8 failures per IP per 15 minutes (plus `auth_fails` audit rows). Authenticated writes: 120 per user per minute. Exports: 30 per user per hour. Setup: 5 attempts per IP per hour. |
+| Frontend checks are not trusted | The UI hides controls as a courtesy; the server recomputes every permission. Tests call the API directly to confirm the denials hold. |
+
 ## Local development
 
 ```bash
@@ -182,16 +244,32 @@ npm run smoke          # end-to-end API/security checks against a running Worker
 The first visit asks you to create the family PIN and loads the starter dataset
 (the household budget, bills, loans, policies, diary and 16 contacts from the reference app).
 
-## Deploy (Cloudflare Workers + D1 via Sites)
+## Deploy (your own Cloudflare account)
 
 `npm run build` produces:
 
-* `dist/` — SPA, manifest, service worker, icons (served directly by `wrangler dev`)
+* `dist/` — SPA, manifest, service worker, icons (uploaded as Worker static assets)
 * `build/worker.js` — bundled Worker
-* `build/static/` — uploadable assets (JS/text/JSON only; icons come from the Worker)
-* `deploy.json` — deploy manifest at the workspace root
+* `build/static/` — text-only asset copy
+* `deploy.json` — manifest for the managed Sites uploader (not used by `wrangler`)
 
-Create the site, provision a D1 database bound as `DB`, then deploy with that manifest.
+`wrangler.jsonc` is the deployment config for a plain Cloudflare account. First-time setup:
+
+```bash
+npx wrangler login
+npx wrangler d1 create family-planner          # copy the database_id into wrangler.jsonc
+npm run build
+npx wrangler deploy
+npx wrangler secret put FIELD_KEY < .secrets/field_key.txt   # 32 random bytes, base64
+```
+
+The Worker creates its own schema on the first request — there are no migrations to apply.
+
+**Documents drive.** R2 is enabled on this account and the bucket `family-planner-drive` is bound as
+`FILES` in `wrangler.jsonc`. Uploads are limited to 8 MB, sniffed for JPEG/PNG/WebP/PDF content
+(never trusted from the header), stored under `drive/<uuid>.<ext>`, and every read or delete is
+scoped to the caller's profile: a known file id from another profile answers 404. On a fresh
+account, run `npx wrangler r2 bucket create family-planner-drive` first and keep the binding.
 
 ## Android
 
@@ -201,10 +279,14 @@ Two ways to run it on a phone, both from the same codebase:
 **Install app** button in Settings). Standalone icon, offline shell, and Web Push notifications
 (Chrome delivers them through FCM even when the app is closed).
 
-**2. Install the native APK** — `android/FamilyPlanner.apk` is built and signed locally:
+**2. Install the native APK** — the signed build is published at
+`/download/family-planner-2.1.0.apk` (also linked from Settings → Mobile notifications) and can be
+rebuilt locally:
 
 ```bash
-bash android/build.sh     # aapt2 + javac + d8 + apksigner, no Gradle, no network
+ANDROID_SDK_ROOT="$LOCALAPPDATA/Android/Sdk" bash android/build.sh
+# aapt2 + javac + d8 + apksigner, no Gradle, no network; reads versionCode/versionName
+# from gradle.properties and copies the result to web/public/download/ for the next deploy
 ```
 
 It is a WebView shell around the live planner: cookies persist the PIN session, the back button
@@ -212,6 +294,29 @@ walks history, external links open in the browser, and the web app calls
 `window.AndroidBridge.notify(title, body)` so every planner alert becomes a real Android
 notification (the shell requests `POST_NOTIFICATIONS` on first launch).
 
-The shell URL lives in `MainActivity.START_URL` — change it if you point the app at a custom domain.
-Note that a WebView shell cannot receive push while it is closed; use the installed PWA when you
-want background alerts too.
+The shell URL comes from `plannerApiBaseUrl` in `android/gradle.properties` (via `BuildConfig`), so a
+new domain needs no Java change. A WebView shell cannot receive push while it is closed; use the
+installed PWA when you want background alerts too.
+
+## Known gaps (not implemented, on purpose)
+
+These are real, tracked gaps rather than silent omissions:
+
+1. **Old household data has not been migrated.** The new database is empty by design; the previous
+deployment still holds the old rows and credentials. `migration/` has the toolkit (snapshot → verify →
+import), but it needs an owner session cookie from the old site, which only you can produce.
+2. **Google Drive / OneDrive upload is not wired.** Encrypted backups download locally and can be put
+   in either service by hand. Direct upload needs OAuth client ids and secrets from Google Cloud
+   Console and Microsoft Entra, which must be created under your accounts.
+3. **Native APK updating is advisory.** `/api/version` can advertise a new build, but serving and
+   installing an APK requires a signed release hosted somewhere and `REQUEST_INSTALL_PACKAGES`; the
+   shell currently tells the user an update exists and links to it.
+4. **End-to-end encryption covers fields and backups, not reports.** Sensitive fields are sealed with
+   the Worker's `FIELD_KEY` (so a D1 dump alone is not readable, but the Worker can decrypt in order to
+   render totals). True zero-knowledge would move the key to the browser and give up server-side
+   aggregation — a deliberate, documented trade-off, not an oversight.
+5. **Four roles are fixed, not custom.** Owner/Admin/Editor/Viewer are enforced server-side; there is no
+   per-permission custom role editor yet.
+
+Full verification lives in `scripts/smoke.mjs` (API, migration snapshot, headers) and
+`scripts/security-test.mjs` (authorisation and isolation, 40 checks).

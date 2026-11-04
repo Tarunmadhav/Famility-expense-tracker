@@ -12,10 +12,11 @@
     {
       "binding": "DB",
       "database_name": "family-planner",
-      "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "migrations"
+      "database_id": "74d24b62-dbbc-4a8c-92d8-2e54fbb566df"
     }
   ],
+  // Documents drive. The bucket exists on this account; uploads are validated by
+  // content sniffing and every read is scoped to the caller's profile.
   "r2_buckets": [
     {
       "binding": "FILES",

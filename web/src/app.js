@@ -4,6 +4,9 @@ import { COLLECTIONS } from './entities.js';
 import { S, applyState, emptyDb } from './state.js';
 import * as api from './api.js';
 import * as views from './views.js';
+import * as shell from './shell.js';
+import * as dashboard from './dashboard.js';
+import { createBackupFile, readBackupFile, restorePayload } from './backup.js';
 import {
   alertDigestText,
   buildICS,
@@ -40,6 +43,7 @@ let lastActive = Date.now();
 const THEME_KEY = 'ffp_theme';
 const LOCK_KEY = 'ffp_lock_minutes';
 const SPACE_KEY = 'ffp_space';
+const PROFILE_KEY = 'ffp_profile';
 
 /** Theme is a per-device preference; the attribute drives every CSS token. */
 function applyTheme(theme, persist = true) {
@@ -70,6 +74,13 @@ function initPreferences() {
   S.lockMinutes = storedLock === null ? 5 : Number(storedLock) || 0;
   S.space = storedSpace === 'personal' ? 'personal' : 'family';
   api.setSpace(S.space);
+  let storedProfile = '';
+  try {
+    storedProfile = localStorage.getItem(PROFILE_KEY) || '';
+  } catch {
+    storedProfile = '';
+  }
+  if (storedProfile) api.setProfile(storedProfile);
 }
 
 initPreferences();
@@ -124,42 +135,30 @@ function render() {
   }
 
   let content;
-  if (S.tab === 'dashboard') content = views.dashboardView();
+  if (S.tab === 'dashboard') content = dashboard.dashboardHtml();
+  else if (S.tab === 'reports') content = dashboard.reportsHtml();
+  else if (S.tab === 'notifications') content = views.inboxView();
   else if (S.tab === 'family') content = views.familyView();
   else if (S.tab === 'subscriptions') content = views.subscriptionsView();
   else if (S.tab === 'budget') content = views.budgetView();
   else if (S.tab === 'settings') content = views.settingsView();
-  else content = `<div class="card" style="border-top:4px solid ${COLLECTIONS[S.tab].dark}"><h2 style="color:${COLLECTIONS[S.tab].dark}">${esc(COLLECTIONS[S.tab].label)}</h2>${views.tableView(S.tab)}</div>`;
+  else if (COLLECTIONS[S.tab]) content = views.tableView(S.tab);
+  else content = views.tableView('expenses');
 
   const active = document.activeElement;
   const focusKey = active && active.getAttribute ? active.getAttribute('data-q') || active.id : '';
   const caret = active && active.selectionStart ? active.selectionStart : 0;
 
-  app().innerHTML = `<header><div class="hrow"><div><h1>Family Finance Planner</h1><div class="hsub" id="hsub">${views.headerSub()}</div></div>
-      <div class="hactions">
-        <span class="sync ${S.sync}" id="sync" title="${S.sync === 'live' ? 'Realtime sync connected' : 'Reconnecting…'}"><i></i>${S.sync === 'live' ? 'Live' : 'Sync'}</span>
-        <div class="seg" role="group" aria-label="Book"><button data-act="space" data-space="family" class="${S.space === 'family' ? 'on' : ''}">Family</button><button data-act="space" data-space="personal" class="${S.space === 'personal' ? 'on' : ''}">Mine</button><button data-act="space" data-space="office" class="${S.space === 'office' ? 'on' : ''}">Office</button></div>
-        <button class="hbtn" data-act="theme" title="Light or dark" aria-label="Light or dark">${S.theme === 'dark' ? '☀' : '☾'}</button>
-        <button class="hbtn" data-act="lock" title="Lock now" aria-label="Lock now">🔒</button>
-        <button class="bellbtn" data-act="bell" aria-label="Notifications">🔔${S.unread ? `<span class="dot">${S.unread > 9 ? '9+' : S.unread}</span>` : ''}</button>
-      </div></div>${S.bellOpen ? views.notificationsPanelHtml() : ''}</header>
-    <nav id="nav">${views.navHtml()}</nav>
-    <main id="main">${content}</main>${views.mobileBarHtml()}`;
-
-  if (S.tab === 'dashboard') {
-    const nameInput = document.getElementById('qn');
-    const phoneInput = document.getElementById('qp');
-    if (nameInput) {
-      nameInput.value = S.search.name;
-      const box = document.getElementById('rn');
-      if (box) box.innerHTML = views.searchResultsHtml('n');
-    }
-    if (phoneInput) {
-      phoneInput.value = S.search.phone;
-      const box = document.getElementById('rp');
-      if (box) box.innerHTML = views.searchResultsHtml('p');
-    }
-  }
+  app().innerHTML = `<div class="shell" data-kind="${shell.currentKind()}">
+      ${shell.sidebarHtml()}
+      <div class="workarea">
+        ${shell.topbarHtml(shell.titleFor(S.tab), views.headerSub())}
+        <main id="main" class="content">${content}</main>
+      </div>
+    </div>
+    ${shell.tabbarHtml()}
+    ${S.bellOpen ? views.notificationsPanelHtml() : ''}
+    ${S.update ? views.updateBannerHtml() : ''}`;
 
   if (focusKey) {
     const el = document.querySelector(`[data-q="${focusKey}"]`) || document.getElementById(focusKey);
@@ -195,7 +194,9 @@ async function boot() {
     if (!status.user) return setView('login');
     S.me = status.user;
     S.pushPublicKey = status.push ? S.pushPublicKey : null;
+    await checkForUpdate();
     await loadApp();
+    await applyDeepLinkProfile();
   } catch (err) {
     setView('login', `Cannot reach the planner API: ${err.message}`);
   }
@@ -209,6 +210,17 @@ async function loadApp() {
   S.rev = 0;
   applyState(payload);
   S.settings = payload.settings || S.settings;
+  // The server decides which profiles exist and what role this account holds in
+  // each; the client only remembers the id it last viewed.
+  S.profiles = payload.profiles || S.profiles || [];
+  S.profile = payload.profile || null;
+  if (S.profile) {
+    S.profileId = S.profile.id;
+    S.role = S.profile.role;
+    S.space = S.profile.kind;
+    api.setProfile(S.profile.id);
+  }
+  S.version = payload.version || S.version;
   S.knownNotifications = new Set((payload.notifications || []).map((n) => n.id));
   S.bootedAt = Date.now();
   S.view = 'app';
@@ -218,6 +230,55 @@ async function loadApp() {
   startPolling();
   await detectPush();
   await checkPendingNotifications(true);
+  announceProfile();
+  ctxSafeLoadInbox();
+}
+
+/** Tell the service worker which profile is open, for discreet push text. */
+function announceProfile() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.ready
+    .then((reg) => {
+      const target = reg.active || navigator.serviceWorker.controller;
+      if (target) target.postMessage({ type: 'profile', id: S.profileId });
+    })
+    .catch(() => {});
+}
+
+/** `/?profile=<id>` opens a notification in its own profile, after the server
+ *  confirms this account is a member of it. */
+async function applyDeepLinkProfile() {
+  let wanted = '';
+  try {
+    wanted = new URLSearchParams(window.location.search).get('profile') || '';
+  } catch {
+    wanted = '';
+  }
+  if (!wanted || wanted === S.profileId) return;
+  if (!(S.profiles || []).some((p) => p.id === wanted)) return;
+  await switchProfile(wanted);
+  try {
+    window.history.replaceState({}, '', window.location.pathname);
+  } catch {
+    /* history is decorative here */
+  }
+}
+
+function ctxSafeLoadInbox() {
+  loadInbox().catch(() => {});
+}
+
+/** Cross-profile inbox: every profile this account can read, grouped by profile. */
+async function loadInbox() {
+  const out = await api.inbox();
+  S.inbox = out.notifications || [];
+  if (out.profiles) {
+    S.profiles = (S.profiles || []).map((p) => {
+      const fresh = out.profiles.find((f) => f.id === p.id);
+      return fresh ? { ...p, unread: fresh.unread } : p;
+    });
+  }
+  return out;
 }
 
 function startRealtime() {
@@ -417,7 +478,9 @@ document.addEventListener('click', async (event) => {
   if (target.hasAttribute('data-tab')) {
     S.tab = target.getAttribute('data-tab');
     S.bellOpen = false;
+    S.drawer = false;
     if (S.tab === 'settings') await loadSettingsData();
+    if (S.tab === 'notifications') loadInbox().catch(() => {});
     window.scrollTo(0, 0);
     render();
     return;
@@ -450,13 +513,54 @@ document.addEventListener('click', async (event) => {
     case 'theme':
       applyTheme(target.getAttribute('data-theme') || (S.theme === 'dark' ? 'light' : 'dark'));
       return render();
-    case 'space':
-      return switchSpace(target.getAttribute('data-space') || 'family');
-    case 'space-cycle': {
-      const order = ['family', 'personal', 'office'];
-      const next = order[(order.indexOf(S.space) + 1) % order.length];
-      return switchSpace(next);
+    case 'space': {
+      const want = target.getAttribute('data-space') || 'family';
+      const found = (S.profiles || []).find((p) => p.kind === want);
+      return switchProfile(found ? found.id : S.profileId);
     }
+    case 'space-cycle':
+      return cycleProfile();
+    case 'profile':
+      return switchProfile(target.getAttribute('data-profile'));
+    case 'drawer':
+      S.drawer = !S.drawer;
+      return render();
+    case 'backup':
+      return encryptedBackup();
+    case 'backup-plain': {
+      const payload = { exportedAt: new Date().toISOString(), profile: S.profile, settings: S.settings, data: S.db };
+      download(
+        `Family_Finance_Planner_${new Date().toISOString().slice(0, 10)}.json`,
+        JSON.stringify(payload, null, 2),
+        'application/json',
+      );
+      return undefined;
+    }
+    case 'restore-backup':
+      return restoreFromFile();
+    case 'inbox-filter':
+      S.inboxFilter = target.getAttribute('data-profile') || '';
+      return render();
+    case 'goto-profile': {
+      const profileId = target.getAttribute('data-profile');
+      const tab = target.getAttribute('data-tab') || 'dashboard';
+      if (profileId && profileId !== S.profileId) {
+        S.tab = tab;
+        return switchProfile(profileId);
+      }
+      S.tab = tab;
+      return render();
+    }
+    case 'dismiss-update':
+      S.update = null;
+      return render();
+    case 'role-set':
+      return changeRole(target.getAttribute('data-id'), target.value);
+    case 'bell-page':
+      S.tab = 'notifications';
+      S.bellOpen = false;
+      loadInbox().catch(() => {});
+      return render();
     case 'top':
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return undefined;
@@ -526,6 +630,10 @@ document.addEventListener('click', async (event) => {
       await api.markRead(null);
       S.unread = 0;
       S.notifications = S.notifications.map((n) => ({ ...n, read_at: n.read_at || Date.now() }));
+      S.profiles = (S.profiles || []).map((p) =>
+        p.id === S.profileId ? { ...p, unread: 0 } : p,
+      );
+      loadInbox().catch(() => {});
       return render();
     case 'push-settings':
       S.bellOpen = false;
@@ -689,14 +797,9 @@ document.addEventListener('input', (event) => {
     S.q[collection] = el.value;
     S.page[collection] = 0;
     render();
-  } else if (el.id === 'qn') {
-    S.search.name = el.value;
-    const box = document.getElementById('rn');
-    if (box) box.innerHTML = views.searchResultsHtml('n');
-  } else if (el.id === 'qp') {
-    S.search.phone = el.value;
-    const box = document.getElementById('rp');
-    if (box) box.innerHTML = views.searchResultsHtml('p');
+  } else if (el.id === 'gsearch') {
+    S.q[S.tab] = el.value;
+    render();
   }
 });
 
@@ -851,30 +954,48 @@ async function unlock(credentials) {
   await loadApp();
 }
 
-async function switchSpace(next) {
-  if (next === S.space) return;
-  S.space = ['family', 'personal', 'office'].includes(next) ? next : 'family';
-  api.setSpace(S.space);
-  try {
-    localStorage.setItem(SPACE_KEY, next);
-  } catch {
-    /* storage blocked */
-  }
-  S.rev = 0;
-  S.db = emptyDb();
-  if (S.space === 'office' && !['dashboard', 'diary', 'contacts', 'expenses', 'settings'].includes(S.tab)) S.tab = 'dashboard';
-  try {
-    await loadApp();
-    toast(
-      S.space === 'personal'
-        ? 'Switched to your private book'
-        : S.space === 'office'
-          ? 'Switched to your office book'
-          : 'Switched to the family book',
-    );
-  } catch {
-    setView('login', 'Please sign in again.');
-  }
+/**
+ * Switch profile. The server validates membership and the new role, then the whole
+ * dataset is dropped and reloaded so no row from the previous profile can linger
+ * on screen or in memory.
+ */
+async function switchProfile(next) {
+  S.drawer = false;
+  if (!next || next === S.profileId) return render();
+  await guard(
+    async () => {
+      const out = await api.switchProfile(next);
+      api.setProfile(out.profile.id);
+      S.profileId = out.profile.id;
+      S.profile = out.profile;
+      S.role = out.profile.role;
+      S.space = out.profile.kind;
+      try {
+        localStorage.setItem(PROFILE_KEY, out.profile.id);
+        localStorage.setItem(SPACE_KEY, out.profile.kind);
+      } catch {
+        /* storage blocked */
+      }
+      S.rev = 0;
+      S.db = emptyDb();
+      S.notifications = [];
+      S.unread = 0;
+      S.tab = ['dashboard', 'reports', 'notifications', 'settings', 'expenses', 'diary', 'contacts', 'budget', 'payments', 'subscriptions', 'loans', 'insurance', 'family'].includes(S.tab)
+        ? S.tab
+        : 'dashboard';
+      await loadApp();
+      announceProfile();
+      toast(`Switched to ${out.profile.name}`);
+    },
+    'Could not switch profile',
+  );
+}
+
+async function cycleProfile() {
+  const list = S.profiles || [];
+  if (list.length < 2) return switchProfile(S.profileId);
+  const idx = list.findIndex((p) => p.id === S.profileId);
+  return switchProfile(list[(idx + 1) % list.length].id);
 }
 
 function startAutoLockWatch() {
@@ -909,15 +1030,19 @@ async function guard(fn, fallbackMessage = '') {
 
 async function loadSettingsData() {
   try {
-    const [activity, sessions, account, files, ai, family] = await Promise.all([
+    const [activity, sessions, account, files, ai, family, members, audit] = await Promise.all([
       api.activity(),
       api.sessions(),
       api.account(),
       api.files(),
       api.aiConnections(),
       api.familyMembers(),
+      api.profileMembers(S.profileId).catch(() => ({ members: [] })),
+      api.auditLog(40).catch(() => ({ events: [] })),
     ]);
     S.members = family.members || [];
+    S.profileMembers = members.members || [];
+    S.audit = audit.events || [];
     S.account.id = family.me || '';
     S.account.role = family.role || account.role;
     S.activity = activity.activity || [];
@@ -932,6 +1057,91 @@ async function loadSettingsData() {
     S.activity = [];
     S.sessions = [];
   }
+}
+
+/* --------------------------------------------------------- backup / roles */
+
+async function encryptedBackup() {
+  const passphrase = window.prompt(
+    'Choose a passphrase for this backup.\n\nIt encrypts the file on this device and is never sent to the server. Without it the backup cannot be restored.',
+    '',
+  );
+  if (!passphrase) return;
+  if (passphrase.length < 8) return toast('Use at least 8 characters for the passphrase');
+  await guard(async () => {
+    const payload = await api.exportProfile(S.profileId);
+    payload.profile = S.profile;
+    const file = await createBackupFile(payload, passphrase);
+    download(file.name, file.text, 'application/json');
+    await api.backupEvent('create', 'download', file.bytes).catch(() => {});
+    toast('Encrypted backup downloaded — keep the passphrase safe');
+  }, 'Could not create the backup');
+}
+
+async function restoreFromFile() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.ffpbak,application/json';
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const passphrase = window.prompt('Passphrase for this backup file', '');
+    if (!passphrase) return;
+    await guard(async () => {
+      const { payload, envelope } = await readBackupFile(file, passphrase);
+      const total = Object.values(envelope.counts || {}).reduce((n, v) => n + Number(v || 0), 0);
+      const when = envelope.createdAt ? new Date(envelope.createdAt).toLocaleString() : 'unknown date';
+      const ok = window.confirm(
+        `Restore ${total} records from the backup made ${when}?\n\nThey are added to “${
+          S.profile ? S.profile.name : 'this profile'
+        }”. Existing records with the same id are updated; nothing is deleted first.`,
+      );
+      if (!ok) return;
+      await api.backupEvent('restore', 'file', file.size).catch(() => {});
+      const stats = await restorePayload(payload);
+      S.rev = 0;
+      await refresh();
+      toast(`Restored ${stats.added} record${stats.added === 1 ? '' : 's'}`);
+    }, 'Could not restore that backup');
+  };
+  input.click();
+}
+
+async function changeRole(userId, role) {
+  if (!userId || !role) return;
+  await guard(async () => {
+    await api.setMemberRole(S.profileId, userId, role);
+    await loadSettingsData();
+    render();
+    toast('Role updated');
+  }, 'Could not change that role');
+}
+
+/** Only a release the server marks as required can raise the update banner. */
+async function checkForUpdate() {
+  try {
+    const out = await api.version();
+    if (!out) return;
+    // Kept regardless of `minimum` so Settings can offer the Android build the
+    // server actually publishes instead of a hard-coded path.
+    if (out.apkUrl) S.release = out;
+    if (!out.minimum) return;
+    if (compareVersions(out.minimum, S.version) > 0) {
+      S.update = { minimum: out.minimum, apkUrl: out.apkUrl || null, notes: out.notes || '' };
+    }
+  } catch {
+    /* version checks are advisory */
+  }
+}
+
+function compareVersions(a, b) {
+  const pa = String(a || '0').split('.').map((n) => Number(n) || 0);
+  const pb = String(b || '0').split('.').map((n) => Number(n) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff) return diff > 0 ? 1 : -1;
+  }
+  return 0;
 }
 
 let formCollection = null;

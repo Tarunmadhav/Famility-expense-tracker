@@ -241,21 +241,21 @@ if ($Step -eq 'Check') {
     exit 0
 }
 
-$config = Read-Config
+$cfg = Read-Config
 
 # ----------------------------------------------------------------- Export
 if ($Step -eq 'Export') {
     Write-Step "Export a snapshot from the source deployment"
-    Write-Note "Source: $($config.source.baseUrl)"
+    Write-Note "Source: $($cfg.source.baseUrl)"
     Write-Note "This is read-only: no records are created, changed or deleted."
-    $session = Get-OwnerSession -BaseUrl $config.source.baseUrl -Purpose 'snapshot export'
+    $session = Get-OwnerSession -BaseUrl $cfg.source.baseUrl -Purpose 'snapshot export'
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
-    $outDir = Join-Path $script:Root $config.outputDir
+    $outDir = Join-Path $script:Root $cfg.outputDir
     if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
     $path = Join-Path $outDir "snapshot-$stamp.json"
 
     try {
-        $resp = Invoke-WebRequest -Uri "$($config.source.baseUrl)$($config.source.snapshotPath)" `
+        $resp = Invoke-WebRequest -Uri "$($cfg.source.baseUrl)$($cfg.source.snapshotPath)" `
             -WebSession $session -UseBasicParsing -TimeoutSec 300
     } catch {
         $hint = "A 404 means the snapshot route is not deployed yet (Phase 3-4 of MIGRATION_PLAN.md)."
@@ -283,8 +283,8 @@ if ($Step -eq 'Export') {
 
 # ----------------------------------------------------------------- Sql
 if ($Step -eq 'Sql') {
-    $snap = Resolve-Snapshot -ConfigObject $config
-    $sqlDir = Join-Path (Join-Path $script:Root $config.outputDir) 'sql'
+    $snap = Resolve-Snapshot -ConfigObject $cfg
+    $sqlDir = Join-Path (Join-Path $script:Root $cfg.outputDir) 'sql'
     Write-Step "Convert snapshot to SQL"
     Invoke-Cmd -Exe 'node' -Arguments @('migration/snapshot-tool.mjs', 'sql', $snap, $sqlDir) | Out-Null
     Write-Ok "SQL files are in $sqlDir"
@@ -294,12 +294,12 @@ if ($Step -eq 'Sql') {
 # ----------------------------------------------------------------- DbCreate
 if ($Step -eq 'DbCreate') {
     Write-Step "Create the destination D1 database"
-    if ($config.destination.d1DatabaseId) {
-        Write-Warn "config already has d1DatabaseId $($config.destination.d1DatabaseId); nothing to do"
+    if ($cfg.destination.d1DatabaseId) {
+        Write-Warn "config already has d1DatabaseId $($cfg.destination.d1DatabaseId); nothing to do"
         exit 0
     }
-    if ($DryRun) { Write-Note "DRY RUN: npx wrangler d1 create $($config.destination.d1DatabaseName)"; exit 0 }
-    $res = Invoke-Cmd -Exe 'npx.cmd' -Arguments @('wrangler', 'd1', 'create', $config.destination.d1DatabaseName) -AllowFail
+    if ($DryRun) { Write-Note "DRY RUN: npx wrangler d1 create $($cfg.destination.d1DatabaseName)"; exit 0 }
+    $res = Invoke-Cmd -Exe 'npx.cmd' -Arguments @('wrangler', 'd1', 'create', $cfg.destination.d1DatabaseName) -AllowFail
     if ($res.Code -ne 0) {
         Stop-WithHelp "d1 create failed" @"
 If it says the database already exists:
@@ -311,31 +311,31 @@ then put the existing database_id into $Config under destination.d1DatabaseId.
     $match = [regex]::Match($res.Output, '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})')
     if ($match.Success) { $id = $match.Groups[1].Value }
     if (-not $id) { Stop-WithHelp "could not read a database id from the command output" "Copy the 'database_id' value from the output into $Config manually." }
-    $config.destination.d1DatabaseId = $id
-    Save-Config -ConfigObject $config
+    $cfg.destination.d1DatabaseId = $id
+    Save-Config -ConfigObject $cfg
     Write-Ok "database id $id recorded in $Config"
 
     Write-Step "Create the destination R2 bucket"
-    $bucket = Invoke-Cmd -Exe 'npx.cmd' -Arguments @('wrangler', 'r2', 'bucket', 'create', $config.destination.r2BucketName) -AllowFail
+    $bucket = Invoke-Cmd -Exe 'npx.cmd' -Arguments @('wrangler', 'r2', 'bucket', 'create', $cfg.destination.r2BucketName) -AllowFail
     if ($bucket.Code -ne 0) {
         Write-Warn "r2 bucket create did not succeed"
         Write-Note "If it mentions R2 not being enabled, enable R2 in the dashboard (billing profile required), then re-run this step."
         Write-Note "If it says the bucket exists, that is fine."
     } else {
-        Write-Ok "bucket $($config.destination.r2BucketName) ready"
+        Write-Ok "bucket $($cfg.destination.r2BucketName) ready"
     }
     exit 0
 }
 
 # ----------------------------------------------------------------- Import
 if ($Step -eq 'Import') {
-    $snap = Resolve-Snapshot -ConfigObject $config
-    if (-not $config.destination.d1DatabaseId) { Stop-WithHelp "destination.d1DatabaseId is empty" "Run: .\migration\migrate.ps1 -Step DbCreate" }
-    $sqlDir = Join-Path (Join-Path $script:Root $config.outputDir) 'sql'
+    $snap = Resolve-Snapshot -ConfigObject $cfg
+    if (-not $cfg.destination.d1DatabaseId) { Stop-WithHelp "destination.d1DatabaseId is empty" "Run: .\migration\migrate.ps1 -Step DbCreate" }
+    $sqlDir = Join-Path (Join-Path $script:Root $cfg.outputDir) 'sql'
     if (-not (Test-Path $sqlDir)) { Stop-WithHelp "no SQL files in $sqlDir" "Run: .\migration\migrate.ps1 -Step Sql" }
 
-    Write-Step "Import data into $($config.destination.d1DatabaseName)"
-    if (-not $config.destination.configFile) { Stop-WithHelp "destination.configFile is empty" "Set it to wrangler.production.jsonc." }
+    Write-Step "Import data into $($cfg.destination.d1DatabaseName)"
+    if (-not $cfg.destination.configFile) { Stop-WithHelp "destination.configFile is empty" "Set it to wrangler.production.jsonc." }
     Write-Note "Additive only: INSERT OR REPLACE. Nothing is deleted. Re-running is safe."
     $files = Get-ChildItem -Path $sqlDir -Filter 'import-*.sql' | Sort-Object Name
     if ($files.Count -eq 0) { Stop-WithHelp "no import-*.sql files in $sqlDir" "Run -Step Sql first." }
@@ -343,7 +343,7 @@ if ($Step -eq 'Import') {
     foreach ($file in $files) {
         $i++
         Write-Note "[$i/$($files.Count)] $($file.Name)"
-        Invoke-Cmd -Exe 'npx.cmd' -Arguments @('wrangler', 'd1', 'execute', $config.destination.d1DatabaseName, '--remote', '--file', $file.FullName) | Out-Null
+        Invoke-Cmd -Exe 'npx.cmd' -Arguments @('wrangler', 'd1', 'execute', $cfg.destination.d1DatabaseName, '--remote', '--file', $file.FullName) | Out-Null
     }
     Write-Ok "imported $($files.Count) file(s)"
     Write-Note "Next: .\migration\verify-migration.ps1 -Step Counts"
@@ -352,7 +352,7 @@ if ($Step -eq 'Import') {
 
 # ----------------------------------------------------------------- Storage
 if ($Step -eq 'Storage') {
-    $snap = Resolve-Snapshot -ConfigObject $config
+    $snap = Resolve-Snapshot -ConfigObject $cfg
     Write-Step "Copy stored files, preserving object keys"
     $listJson = & node migration/snapshot-tool.mjs list-files $snap
     if ($LASTEXITCODE -ne 0) { Stop-WithHelp "could not list files from the snapshot" "Run: node migration/snapshot-tool.mjs list-files $snap" }
@@ -362,8 +362,8 @@ if ($Step -eq 'Storage') {
         exit 0
     }
     Write-Note "$(@($files).Count) file(s) to copy"
-    $session = Get-OwnerSession -BaseUrl $config.source.baseUrl -Purpose 'file downloads'
-    $tmp = Join-Path (Join-Path $script:Root $config.outputDir) 'files-tmp'
+    $session = Get-OwnerSession -BaseUrl $cfg.source.baseUrl -Purpose 'file downloads'
+    $tmp = Join-Path (Join-Path $script:Root $cfg.outputDir) 'files-tmp'
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
     $copied = 0
     try {
@@ -371,7 +371,7 @@ if ($Step -eq 'Storage') {
             $name = "$($file.id)"
             $target = Join-Path $tmp $name
             try {
-                Invoke-WebRequest -Uri "$($config.source.baseUrl)/api/files/$($file.id)" -WebSession $session `
+                Invoke-WebRequest -Uri "$($cfg.source.baseUrl)/api/files/$($file.id)" -WebSession $session `
                     -OutFile $target -UseBasicParsing -TimeoutSec 120
             } catch {
                 Write-Fail "download failed for $($file.name) ($($file.key)): $($_.Exception.Message)"
@@ -384,7 +384,7 @@ if ($Step -eq 'Storage') {
                 Remove-Item $target -Force
                 continue
             }
-            $objectPath = "$($config.destination.r2BucketName)/$($file.key)"
+            $objectPath = "$($cfg.destination.r2BucketName)/$($file.key)"
             $put = Invoke-Cmd -Exe 'npx.cmd' -Arguments @('wrangler', 'r2', 'object', 'put', $objectPath, '--file', $target, '--content-type', $file.mime) -AllowFail
             if ($put.Code -ne 0) { Write-Fail "upload failed for $($file.key)"; continue }
             Write-Ok "copied $($file.key) ($actual bytes)"
@@ -404,27 +404,27 @@ if ($Step -eq 'Storage') {
 if ($Step -eq 'Secret') {
     Write-Step "Apply FIELD_KEY to the destination Worker"
     Write-Note "The value is piped from the file: it never appears in a command line or in this output."
-    if (-not (Test-Path $config.keyFile)) { Stop-WithHelp "key file not found: $($config.keyFile)" "See BACKUP_GUIDE.md." }
-    if ($DryRun) { Write-Note "DRY RUN: <key file> | npx wrangler secret put FIELD_KEY --config $($config.destination.configFile)"; exit 0 }
-    $secretFile = Resolve-Path $config.keyFile
+    if (-not (Test-Path $cfg.keyFile)) { Stop-WithHelp "key file not found: $($cfg.keyFile)" "See BACKUP_GUIDE.md." }
+    if ($DryRun) { Write-Note "DRY RUN: <key file> | npx wrangler secret put FIELD_KEY --config $($cfg.destination.configFile)"; exit 0 }
+    $secretFile = Resolve-Path $cfg.keyFile
     $content = Get-Content -Raw -Path $secretFile
     if ([string]::IsNullOrWhiteSpace($content)) { Stop-WithHelp "key file is empty" "See BACKUP_GUIDE.md." }
-    $content | & npx.cmd wrangler secret put FIELD_KEY --config $config.destination.configFile
+    $content | & npx.cmd wrangler secret put FIELD_KEY --config $cfg.destination.configFile
     if ($LASTEXITCODE -ne 0) { Stop-WithHelp "wrangler secret put failed" "Check the deploy config path and that you are logged in." }
     Write-Ok "secret FIELD_KEY applied"
-    Write-Note "Verify the file matches the data: node migration/snapshot-tool.mjs decrypt-check <snapshot> $($config.keyFile)"
+    Write-Note "Verify the file matches the data: node migration/snapshot-tool.mjs decrypt-check <snapshot> $($cfg.keyFile)"
     exit 0
 }
 
 # ----------------------------------------------------------------- Deploy
 if ($Step -eq 'Deploy') {
     Write-Step "Deploy the Worker to your account"
-    if (-not (Test-Path $config.destination.configFile)) {
-        Stop-WithHelp "deploy config not found: $($config.destination.configFile)" "This file is created in Phase 5 of MIGRATION_PLAN.md (wrangler.production.jsonc)."
+    if (-not (Test-Path $cfg.destination.configFile)) {
+        Stop-WithHelp "deploy config not found: $($cfg.destination.configFile)" "This file is created in Phase 5 of MIGRATION_PLAN.md (wrangler.production.jsonc)."
     }
     Write-Note "This publishes a NEW origin. The current deployment is untouched."
-    if ($DryRun) { Write-Note "DRY RUN: npx wrangler deploy --config $($config.destination.configFile)"; exit 0 }
-    $res = Invoke-Cmd -Exe 'npx.cmd' -Arguments @('wrangler', 'deploy', '--config', $config.destination.configFile) -AllowFail
+    if ($DryRun) { Write-Note "DRY RUN: npx wrangler deploy --config $($cfg.destination.configFile)"; exit 0 }
+    $res = Invoke-Cmd -Exe 'npx.cmd' -Arguments @('wrangler', 'deploy', '--config', $cfg.destination.configFile) -AllowFail
     if ($res.Code -ne 0) { Stop-WithHelp "deploy failed" "Read the first error; usually a wrong database_id, a missing bucket, or not logged in." }
     foreach ($line in ($res.Output -split "`n")) {
         if ($line -match 'https://[a-z0-9.-]+\.workers\.dev') { Write-Ok "deployed: $($line.Trim())" }
@@ -435,17 +435,17 @@ if ($Step -eq 'Deploy') {
 
 # ----------------------------------------------------------------- Health
 if ($Step -eq 'Health') {
-    Assert-DestinationBase -ConfigObject $config
-    Write-Step "Check $($config.destination.baseUrl)"
+    Assert-DestinationBase -ConfigObject $cfg
+    Write-Step "Check $($cfg.destination.baseUrl)"
     try {
-        $health = Invoke-RestMethod -Uri "$($config.destination.baseUrl)/api/health" -TimeoutSec 30
+        $health = Invoke-RestMethod -Uri "$($cfg.destination.baseUrl)/api/health" -TimeoutSec 30
     } catch {
         Stop-WithHelp "health endpoint failed: $($_.Exception.Message)" "A 5xx here usually means the D1 binding is missing from the deploy config."
     }
     if ($health.ok -and $health.database -and $health.assets) { Write-Ok "health: $($health | ConvertTo-Json -Compress)" }
     else { Write-Fail "unhealthy: $($health | ConvertTo-Json -Compress)" }
     try {
-        $status = Invoke-RestMethod -Uri "$($config.destination.baseUrl)/api/auth/status" -TimeoutSec 30
+        $status = Invoke-RestMethod -Uri "$($cfg.destination.baseUrl)/api/auth/status" -TimeoutSec 30
         Write-Ok "auth: $($status | ConvertTo-Json -Compress)"
         if (-not $status.configured) { Write-Warn "configured=false means no user rows: the import has not happened" }
     } catch {

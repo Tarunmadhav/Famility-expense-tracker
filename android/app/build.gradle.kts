@@ -5,7 +5,7 @@ plugins {
 val plannerVersionCode = providers.gradleProperty("versionCode").get().toInt()
 val plannerVersionName = providers.gradleProperty("versionName").get()
 val plannerApiBaseUrl = providers.gradleProperty("plannerApiBaseUrl")
-    .getOrElse("https://site-0f6d51dc534d4dd4af419f3a4cf5f0ad.freebuff.page/")
+    .getOrElse("https://family-finance-planner.tarungudipatimadhav.workers.dev/")
 
 val signingVariables = listOf(
     "ANDROID_KEYSTORE_PATH",

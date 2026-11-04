@@ -5,6 +5,8 @@ build/
 .secrets/
 backups/
 *.apk
+# ...except the build that is published to /download/ so a clone can rebuild it
+!web/public/download/*.apk
 android/build/
 android/.gradle/
 .dev.vars

@@ -28,6 +28,10 @@ public class MainActivity extends Activity {
     // Supplied by Gradle (android/gradle.properties -> plannerApiBaseUrl), so a
     // debug build can point at a local Worker without touching this file.
     private static final String START_URL = BuildConfig.PLANNER_URL;
+    // In-app links are the ones on the deployment's own host, so moving the Worker to
+    // another domain (freebuff.page -> workers.dev) needs no code change here.
+    private static final String APP_HOST = Uri.parse(START_URL).getHost() == null
+            ? "" : Uri.parse(START_URL).getHost();
     private static final String CHANNEL_ID = "planner_alerts";
     private static final int NOTIFICATION_PERMISSION = 7;
 
@@ -58,7 +62,7 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 String host = uri.getHost() == null ? "" : uri.getHost();
-                if (host.endsWith("freebuff.page")) return false;
+                if (host.equals(APP_HOST)) return false;
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, uri));
                 } catch (Exception ignored) {

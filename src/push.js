@@ -143,39 +143,71 @@ async function sendOne(env, subscription, payloadStr) {
   return { ok: res.ok, status: res.status };
 }
 
-/** Push every fresh notification to every subscribed device. */
+/**
+ * Subscribers that may receive a notification for one profile: only devices
+ * belonging to accounts that are members of that exact profile. This is what
+ * stops one household's bill reminder from landing on another household's phone.
+ */
+async function subsForProfile(env, profileId) {
+  const members = await env.DB.prepare(`SELECT user_id FROM profile_members WHERE profile_id = ?`)
+    .bind(profileId)
+    .all();
+  const ids = (members.results || []).map((r) => r.user_id).filter(Boolean);
+  if (!ids.length) return [];
+  const holes = ids.map(() => '?').join(',');
+  const res = await env.DB.prepare(
+    `SELECT endpoint, p256dh, auth, user_id FROM push_subs WHERE user_id IN (${holes})`,
+  )
+    .bind(...ids)
+    .all();
+  return res.results || [];
+}
+
+/** Push every fresh notification to the devices of that profile's members. */
 export async function sendPushToAll(env, notifications) {
   if (!notifications || !notifications.length) return { sent: 0, failed: 0 };
-  const res = await env.DB.prepare(`SELECT endpoint, p256dh, auth FROM push_subs`).all();
-  const subs = res.results || [];
-  if (!subs.length) return { sent: 0, failed: 0, reason: 'no_subscribers' };
+  const byProfile = new Map();
+  for (const note of notifications) {
+    const space = note.space || 'family';
+    if (!byProfile.has(space)) byProfile.set(space, []);
+    byProfile.get(space).push(note);
+  }
   let sent = 0;
   let failed = 0;
-  for (const note of notifications) {
-    const payload = JSON.stringify({
-      title: note.title,
-      body: note.body,
-      tag: note.type,
-      level: note.level,
-      url: '/',
-    });
-    for (const sub of subs) {
-      try {
-        const out = await sendOne(env, sub, payload);
-        if (out.ok) sent += 1;
-        else failed += 1;
-      } catch {
-        failed += 1;
+  let subscribers = 0;
+  for (const [space, notes] of byProfile) {
+    const subs = await subsForProfile(env, space);
+    subscribers += subs.length;
+    for (const note of notes) {
+      const payload = JSON.stringify({
+        title: note.title,
+        body: note.body,
+        tag: `${space}:${note.type || 'planner'}`,
+        level: note.level,
+        profile: space,
+        url: `/?profile=${encodeURIComponent(space)}`,
+      });
+      for (const sub of subs) {
+        try {
+          const out = await sendOne(env, sub, payload);
+          if (out.ok) sent += 1;
+          else failed += 1;
+        } catch {
+          failed += 1;
+        }
       }
     }
   }
-  return { sent, failed };
+  return { sent, failed, subscribers, reason: subscribers ? undefined : 'no_subscribers' };
 }
 
-export async function sendTestPush(env) {
+export async function sendTestPush(env, userId) {
   const keys = await getMeta(env, 'vapid', null);
   if (!keys) return { sent: 0, failed: 0, reason: 'no_vapid' };
-  const res = await env.DB.prepare(`SELECT endpoint, p256dh, auth FROM push_subs`).all();
+  // Only the asking account's own devices get a test push.
+  const res = await env.DB.prepare(`SELECT endpoint, p256dh, auth FROM push_subs WHERE user_id = ?`)
+    .bind(userId)
+    .all();
   const subs = res.results || [];
   let sent = 0;
   let failed = 0;
@@ -200,12 +232,13 @@ export async function sendTestPush(env) {
   return { sent, failed, subscribers: subs.length };
 }
 
-export async function saveSubscription(env, sub, ua) {
+export async function saveSubscription(env, sub, ua, userId = null) {
   const endpoint = String(sub.endpoint || '').slice(0, 500);
   if (!/^https:\/\//.test(endpoint)) return false;
   await env.DB.prepare(
-    `INSERT INTO push_subs (id, endpoint, p256dh, auth, created_at, ua) VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth`,
+    `INSERT INTO push_subs (id, endpoint, p256dh, auth, created_at, ua, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth,
+       user_id = COALESCE(excluded.user_id, push_subs.user_id)`,
   )
     .bind(
       crypto.randomUUID(),
@@ -214,11 +247,16 @@ export async function saveSubscription(env, sub, ua) {
       String(sub.keys?.auth || '').slice(0, 100),
       Date.now(),
       (ua || '').slice(0, 180),
+      userId,
     )
     .run();
   return true;
 }
 
-export async function removeSubscription(env, endpoint) {
-  await env.DB.prepare(`DELETE FROM push_subs WHERE endpoint = ?`).bind(String(endpoint || '').slice(0, 500)).run();
+export async function removeSubscription(env, endpoint, userId) {
+  // Only the owner of a subscription may delete it; without a user id the row
+  // cannot match, so a missing session never widens the delete.
+  await env.DB.prepare(`DELETE FROM push_subs WHERE endpoint = ? AND user_id = ?`)
+    .bind(String(endpoint || '').slice(0, 500), String(userId || ''))
+    .run();
 }

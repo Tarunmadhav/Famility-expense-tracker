@@ -59,4 +59,18 @@ export const S = {
   theme: 'light',
   lockMinutes: 5,
   locked: false,
+  // Profiles and their roles come from the server on every load; the client only
+  // mirrors them so the switcher can render, never to decide access.
+  profiles: [],
+  profile: null,
+  profileId: '',
+  role: 'viewer',
+  inbox: [],
+  inboxFilter: '',
+  audit: [],
+  profileMembers: [],
+  drawer: false,
+  version: '2.1.0',
+  update: null,
+  release: null,
 };

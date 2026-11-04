@@ -53,6 +53,7 @@ jobs:
           name: wrangler-log
           path: wrangler.log
 
-  # Deployment stays manual: the site is published through Freebuff Sites
-  # (sites_deploy), not `wrangler deploy`. Add a CLOUDFLARE_API_TOKEN secret and a
-  # deploy job here only if hosting moves to a plain Cloudflare account.
+  # Deployment stays manual against the owner's Cloudflare account:
+  #   npm run build && npx wrangler deploy
+  # Add a CLOUDFLARE_API_TOKEN secret and a deploy job here if you want pushes to
+  # main to publish automatically.

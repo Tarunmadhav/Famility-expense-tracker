@@ -70,7 +70,7 @@ Description=Uptime probe
 [Service]
 Type=oneshot
 User=deploy
-Environment=URL=https://site-0f6d51dc534d4dd4af419f3a4cf5f0ad.freebuff.page/api/health
+Environment=URL=https://family-finance-planner.tarungudipatimadhav.workers.dev/api/health
 ExecStart=/usr/local/bin/uptime-probe.sh
 
 # /etc/systemd/system/uptime-probe.timer

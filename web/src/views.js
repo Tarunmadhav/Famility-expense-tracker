@@ -2,24 +2,9 @@
 
 import { COLLECTIONS } from './entities.js';
 import { S } from './state.js';
-import {
-  alertsList,
-  billAlert,
-  bdayNext,
-  health,
-  insStatus,
-  kpis,
-  openTasks,
-  relC,
-  selfC,
-  spendByCategory,
-  sum,
-  taskDue,
-} from './analytics.js';
-import { PAL, barChart, donut } from './charts.js';
+import { billAlert, bdayNext, insStatus, kpis, selfC, sum } from './analytics.js';
 import { digits, dfmt, esc, daysTo, money, num, stat } from './format.js';
 import {
-  alertDigestText,
   googleCalendarLink,
   notificationMessage,
   recordMessage,
@@ -27,185 +12,77 @@ import {
   whatsappLink,
 } from './exporters.js';
 
-export const TABS = [
-  ['dashboard', 'Dashboard', '#1B365D'],
-  ['family', 'Family', '#0E7490'],
-  ['contacts', 'Contacts', '#0F766E'],
-  ['expenses', 'Expenses', '#C2410C'],
-  ['budget', 'Budget', '#15803D'],
-  ['payments', 'Bills', '#6D28D9'],
-  ['subscriptions', 'Subscriptions', '#7C3AED'],
-  ['loans', 'Loans', '#B91C1C'],
-  ['insurance', 'Insurance', '#1D4ED8'],
-  ['diary', 'Diary & Tasks', '#BE185D'],
-  ['settings', 'Settings', '#475569'],
-];
-
-const OFFICE_TABS = ['dashboard', 'diary', 'contacts', 'expenses', 'settings'];
-
-export function navHtml() {
-  const tabs = S.space === 'office' ? TABS.filter(([id]) => OFFICE_TABS.includes(id)) : TABS;
-  return tabs
-    .map(([id, label]) => {
-      const text = S.space === 'office' && id === 'diary' ? 'Tasks & Notes' : label;
-      return `<button data-tab="${id}" class="${S.tab === id ? 'on' : ''}">${text}</button>`;
-    })
-    .join('');
+export function headerSub() {
+  const k = kpis();
+  const kind = S.profile ? S.profile.kind : 'family';
+  const name = (S.profile && S.profile.name) || selfC().name || S.me.name || 'Family';
+  const bits = [esc(name)];
+  if (kind !== 'office') bits.push(`Surplus ${money(k.surplus)}`);
+  bits.push(`${k.pending} open task${k.pending === 1 ? '' : 's'}`);
+  return bits.join(' · ');
 }
 
-export function mobileBarHtml() {
-  const label = S.space === 'personal' ? 'Mine' : S.space === 'office' ? 'Office' : 'Family';
-  return `<div class="mobilebar" role="toolbar" aria-label="Quick actions">
-    <button data-act="space-cycle" aria-label="Switch book, now ${label}"><span>${label}</span><small>Books</small></button>
-    <button data-act="theme" aria-label="Toggle light or dark"><span>${S.theme === 'dark' ? '☀' : '☾'}</span><small>Theme</small></button>
-    <button data-act="lock" aria-label="Lock now"><span>🔒</span><small>Lock</small></button>
-    <button data-act="top" aria-label="Back to top"><span>↑</span><small>Top</small></button>
+/* --------------------------------------------------------- notifications */
+
+/** Cross-profile inbox: grouped by profile, labelled so nothing looks anonymous. */
+export function inboxView() {
+  const items = S.inbox || [];
+  const profiles = S.profiles || [];
+  const filter = S.inboxFilter || '';
+  const visible = filter ? items.filter((n) => n.space === filter) : items;
+  const unread = visible.filter((n) => !n.read_at).length;
+
+  const chips = [
+    `<button class="chipbtn${filter ? '' : ' on'}" data-act="inbox-filter" data-profile="">All profiles (${items.length})</button>`,
+    ...profiles.map(
+      (p) =>
+        `<button class="chipbtn${filter === p.id ? ' on' : ''}" data-act="inbox-filter" data-profile="${esc(p.id)}">${esc(
+          p.name,
+        )}${p.unread ? ` · ${p.unread}` : ''}</button>`,
+    ),
+  ].join('');
+
+  const rows = visible.length
+    ? visible
+        .map(
+          (n) => `<div class="noterow${n.read_at ? '' : ' unread'} lvl-${esc(n.level || 'info')}">
+            <div class="nrhead"><b>${esc(n.title)}</b><span class="mut small">${esc(
+              n.profile_name || n.space,
+            )}</span></div>
+            <div class="mut">${esc(n.body)}</div>
+            <div class="nrmeta"><span class="mut small">${esc(relative(n.created_at))}</span>
+              <button class="linkbtn" data-act="goto-profile" data-profile="${esc(n.space)}" data-tab="${
+                n.collection === 'payments' || n.collection === 'insurance' || n.collection === 'diary'
+                  ? n.collection
+                  : 'dashboard'
+              }">Open in profile</button></div>
+          </div>`,
+        )
+        .join('')
+    : '<p class="mut" style="padding:12px">Nothing here yet. Bills, renewals, tasks and birthdays arrive automatically.</p>';
+
+  return `<div class="dash">
+    <section class="hero"><div><h2>Notifications</h2>
+      <p class="mut">${items.length} total · ${unread} unread in this view. Every profile you can read reports here, even while you are working in another one.</p></div>
+      <div class="heroacts"><button class="btn s g" data-act="note-read">Mark all read</button></div>
+    </section>
+    <div class="chiprow">${chips}</div>
+    <section class="card"><div class="inbox">${rows}</div></section>
   </div>`;
 }
 
-export function headerSub() {
-  const k = kpis();
-  const name = selfC().name || S.me.name || 'Family';
-  return `${esc(name)}  |  Surplus ${money(k.surplus)}  |  ${k.pending} open task${k.pending === 1 ? '' : 's'}`;
-}
+/* -------------------------------------------------------------- updates */
 
-/* ------------------------------------------------------------- dashboard */
-
-function prof(label, value) {
-  return `<div class="res" style="margin:0 0 6px;min-height:0"><div class="row"><span>${esc(label)}</span><b>${esc(value || '-')}</b></div></div>`;
-}
-
-function watch(title, dark, tint, heads, rows) {
-  const body = rows.length
-    ? rows.map((r) => `<tr>${r.map((cell) => `<td>${cell}</td>`).join('')}</tr>`).join('')
-    : `<tr><td colspan="${heads.length}" class="mut">Nothing to show</td></tr>`;
-  return `<div class="bar" style="background:${dark}">${title}</div><div class="tw"><table style="--tint:${tint};--dark:${dark}"><thead><tr>${heads.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`;
-}
-
-export function searchCardHtml() {
-  return `<div class="srch"><div class="card"><h2>Search by NAME → number</h2><input class="search" id="qn" placeholder="Type part of a name" style="width:100%" value="${esc(S.search.name)}"><div class="res" id="rn"><span class="mut">Results appear here</span></div></div><div class="card"><h2>Search by NUMBER → name</h2><input class="search" id="qp" placeholder="Type a number (any format)" inputmode="tel" style="width:100%" value="${esc(S.search.phone)}"><div class="res" id="rp"><span class="mut">Results appear here</span></div></div></div>`;
-}
-
-function contactCard(c) {
-  const wa = digits(c.mobile).length >= 10 ? `https://wa.me/91${digits(c.mobile).slice(-10)}` : '';
-  return `<div style="border-bottom:1px solid var(--line);padding:6px 0"><b>${esc(c.name)}</b> <span class="mut">${esc(c.rel)}</span>
-    <div class="row"><span>Mobile</span><span>${esc(c.mobile)}</span></div>
-    <div class="row"><span>Alternative</span><span>${esc(c.alt)}</span></div>
-    <div class="row"><span>Email</span><span>${esc(c.email)}</span></div>
-    <div class="row"><span>Birthday</span><span>${esc(c.bday ? dfmt(c.bday) : '-')}</span></div>
-    <div class="row"><span>Organisation</span><span>${esc(c.org)}</span></div>
-    ${wa ? `<div style="margin-top:4px"><a class="btn s g" href="${wa}" target="_blank" rel="noopener">WhatsApp</a> <a class="btn s g" href="tel:${esc(String(c.mobile).replace(/\s/g, ''))}">Call</a></div>` : ''}</div>`;
-}
-
-export function searchResultsHtml(kind) {
-  const query = String(kind === 'n' ? S.search.name : S.search.phone).trim();
-  if (!query) return '<span class="mut">Results appear here</span>';
-  let matches;
-  if (kind === 'n') {
-    const q = query.toLowerCase();
-    matches = (S.db.contacts || []).filter((c) => String(c.name || '').toLowerCase().includes(q));
-  } else {
-    const wanted = digits(query).slice(-10);
-    matches = wanted.length < 3
-      ? []
-      : (S.db.contacts || []).filter((c) => digits(c.mobile).includes(wanted) || digits(c.alt).includes(wanted));
-  }
-  if (!matches.length) return '<span class="mut">Not found</span>';
-  const more = matches.length > 5 ? ' (showing 5)' : '';
-  return `<div class="mut" style="margin-bottom:4px">${matches.length} match${matches.length > 1 ? 'es' : ''}${more}</div>${matches.slice(0, 5).map(contactCard).join('')}`;
-}
-
-export function dashboardView() {
-  const k = kpis();
-  const h = health();
-  const subMonthly = subscriptionsMonthly();
-  const wife = relC('Wife') && relC('Wife').name ? relC('Wife') : relC('Spouse / Family');
-  const daughter = relC('Daughter', 'Madhu') && relC('Daughter', 'Madhu').name ? relC('Daughter', 'Madhu') : relC('Daughter / Family');
-  const me = selfC();
-  let html = '';
-  const alerts = alertsList();
-  if (alerts.length) {
-    html += `<div class="alerts"><b>🔔 ${alerts.length} alert${alerts.length > 1 ? 's' : ''}</b> <a href="#" data-act="alerts">${S.alertsOpen ? 'hide' : 'show'}</a><span class="alertbtns"><button class="btn s g" data-act="wa" data-target="digest">WhatsApp</button><button class="btn s g" data-act="sms" data-target="digest">SMS</button></span>${S.alertsOpen ? `<ul>${alerts.map((a) => `<li><a href="#" data-act="goto" data-tab="${a.tab || 'dashboard'}">${esc(a.t)}</a></li>`).join('')}</ul>` : ''}</div>`;
-  }
-
-  html += `<div class="bar" style="background:#1B365D">PROFILE &amp; FAMILY</div><div class="card grid two"><div>${prof('Name', me.name)}${prof('Mobile (linked)', S.settings.mobile)}${prof('Email', me.email)}${prof('Organisation', me.org)}</div><div>${prof('Spouse', wife && wife.name ? `${wife.name}  |  ${wife.mobile}` : '')}${prof('Daughter', daughter && daughter.name ? `${daughter.name}  |  ${daughter.mobile}` : '')}${prof('Daily alert time', S.settings.alertTime)}${prof('Alert channel', S.settings.channel)}</div></div>` +
-    `<div class="card"><div class="tools"><h2 style="margin:0">Family at a glance</h2><button class="btn s" style="background:${COLLECTIONS.family.dark};margin-left:auto" data-tab="family">Manage family</button></div><div class="memberstrip">${(S.db.family || []).slice(0, 6).map((m) => `<button class="minimember" data-act="edit" data-ek="family" data-id="${esc(m.id)}"><span class="avatar">${esc(initials(m.name))}</span><span class="mmname">${esc(m.name)}</span><span class="mmrel mut">${esc(m.relation || m.role || '')}</span></button>`).join('') || '<span class="mut">No family members yet — add them in the Family tab.</span>'}</div></div>`;
-
-  const cards = [
-    ['TOTAL MONTHLY INCOME', money(k.income), '#15803D', 'budget'],
-    ['TOTAL MONTHLY EXPENSES', money(k.expenses), '#C2410C', 'budget'],
-    ['NET MONTHLY SURPLUS', money(k.surplus), '#1D4ED8', 'budget'],
-    ['TOTAL OUTSTANDING DEBT', money(k.debt), '#B91C1C', 'loans'],
-    ['MONTHLY EMIs / MIN DUES', money(k.emi), '#6D28D9', 'loans'],
-    ['DAILY SPEND (LOGGED)', money(k.daily), '#C2410C', 'expenses'],
-    ['UNPAID BILLS', money(k.unpaid), '#B91C1C', 'payments'],
-    ['TOTAL INSURANCE COVER', money(k.cover), '#1D4ED8', 'insurance'],
-    ['TASKS UNCOMPLETED', k.pending, '#BE185D', 'diary'],
-    ['CONTACTS', k.contacts.toLocaleString('en-IN'), '#0F766E', 'contacts'],
-    ['SUBSCRIPTIONS / MONTH', money(subMonthly), '#7C3AED', 'subscriptions'],
-  ];
-  html += `<div class="bar" style="background:#1B365D">KEY NUMBERS <span class="barhint">tap a card to open the module</span></div><div class="grid kpis">${cards.map((c) => `<div class="kpi click" style="--c:${c[2]}" data-tab="${c[3]}"><div class="l">${c[0]}</div><div class="v">${c[1]}</div></div>`).join('')}</div>`;
-
-  const healthCards = [
-    ['SAVINGS RATE', `${(h.savingRate * 100).toFixed(1)}%`, h.savingRate >= 0.2 ? '#15803D' : h.savingRate >= 0 ? '#B54708' : '#B91C1C', 'budget'],
-    ['EMI / INCOME', `${(h.dti * 100).toFixed(1)}%`, h.dti <= 0.35 ? '#15803D' : h.dti <= 0.5 ? '#B54708' : '#B91C1C', 'loans'],
-    ['BUDGET UTILISED', `${(h.budgetUse * 100).toFixed(1)}%`, h.budgetUse <= 1 ? '#15803D' : '#B91C1C', 'budget'],
-    ['COVER vs 1-YR SPEND', `${h.coverMultiple.toFixed(1)}x`, h.coverMultiple >= 1 ? '#1D4ED8' : '#B54708', 'insurance'],
-  ];
-  html += `<div class="bar" style="background:#0F766E">FINANCIAL HEALTH</div><div class="grid kpis">${healthCards.map((c) => `<div class="kpi click" style="--c:${c[2]}" data-tab="${c[3]}"><div class="l">${c[0]}</div><div class="v">${c[1]}</div></div>`).join('')}</div>`;
-
-  html += `<div class="bar" style="background:#0F766E">CONTACT SEARCH</div>${searchCardHtml()}`;
-
-  html += `<div class="bar" style="background:#1B365D">CHARTS</div><div class="grid two">`;
-  html += `<div class="card chart">${barChart('Income vs expenses: planned vs actual', ['Income', 'Expenses', 'Surplus'], [
-    { n: 'Planned', c: PAL[0], v: [sum(S.db.budgetIn, 'planned'), sum(S.db.budgetEx, 'planned'), sum(S.db.budgetIn, 'planned') - sum(S.db.budgetEx, 'planned')] },
-    { n: 'Actual', c: PAL[1], v: [k.income, k.expenses, k.surplus] },
-  ])}</div>`;
-  html += `<div class="card chart">${barChart('Monthly expenses by category', (S.db.budgetEx || []).map((r) => r.source), [
-    { n: 'Planned', c: PAL[0], v: (S.db.budgetEx || []).map((r) => num(r.planned)) },
-    { n: 'Actual', c: PAL[1], v: (S.db.budgetEx || []).map((r) => num(r.actual)) },
-  ], true)}</div>`;
-  html += `<div class="card chart">${donut('Daily spend by category', spendByCategory().map((c) => ({ l: c.l, v: c.v, money: 1 })))}</div>`;
-  html += `<div class="card chart">${barChart('Loans: outstanding vs monthly EMI', (S.db.loans || []).map((l) => l.name), [
-    { n: 'Outstanding', c: PAL[4], v: (S.db.loans || []).map((l) => num(l.outstanding)) },
-    { n: 'Monthly EMI', c: PAL[3], v: (S.db.loans || []).map((l) => num(l.emi)) },
-  ])}</div>`;
-  html += `<div class="card chart">${barChart('Insurance coverage', (S.db.insurance || []).map((l) => l.name), [
-    { n: 'Coverage', c: PAL[0], v: (S.db.insurance || []).map((l) => num(l.sum)) },
-  ])}</div>`;
-  const paid = sum((S.db.payments || []).filter((p) => p.status === 'Paid'), 'amount');
-  html += `<div class="card chart">${donut('Bills: paid vs unpaid', [{ l: 'Paid', v: paid, c: '#15803D', money: 1 }, { l: 'Unpaid', v: k.unpaid, c: '#B91C1C', money: 1 }])}</div>`;
-  const dc = { Completed: 0, Pending: 0, Incomplete: 0 };
-  (S.db.diary || []).forEach((d) => { dc[d.status] = (dc[d.status] || 0) + 1; });
-  html += `<div class="card chart">${donut('Diary status', [{ l: 'Completed', v: dc.Completed, c: '#15803D' }, { l: 'Pending', v: dc.Pending, c: '#B54708' }, { l: 'Incomplete', v: dc.Incomplete, c: '#B91C1C' }])}</div></div>`;
-
-  const bills = (S.db.payments || [])
-    .slice()
-    .sort((a, b) => (a.status === 'Paid') - (b.status === 'Paid') || String(a.due).localeCompare(String(b.due)))
-    .slice(0, 10)
-    .map((p) => [esc(p.payee), money(p.amount), dfmt(p.due), p.status === 'Paid' ? '-' : daysTo(p.due), stat(billAlert(p)), esc(`${p.contact} (${p.phone})`)]);
-  html += watch('BILLS &amp; PAYMENT DUES', '#6D28D9', '#EBE3FB', ['Bill / payee', 'Amount', 'Due', 'Days left', 'Status', 'Contact'], bills);
-
-  const renewals = (S.db.insurance || [])
-    .slice()
-    .sort((a, b) => String(a.renewal).localeCompare(String(b.renewal)))
-    .map((p) => [esc(p.name), money(p.sum), money(p.premium), dfmt(p.renewal), daysTo(p.renewal), stat(insStatus(p))]);
-  html += watch('INSURANCE RENEWALS', '#1D4ED8', '#DEE8FC', ['Policy', 'Coverage', 'Premium', 'Renewal', 'Days left', 'Status'], renewals);
-
-  const tasks = openTasks()
-    .sort((a, b) => taskDue(a).localeCompare(taskDue(b)))
-    .map((t) => [esc(t.title), dfmt(taskDue(t)), stat(t.priority), stat(t.status), esc(t.follow), esc(`${t.contact} (${t.phone})`)]);
-  html += watch('UNCOMPLETED TASKS', '#BE185D', '#FBDDEB', ['Task', 'Due', 'Priority', 'Status', 'Follow-up', 'Contact'], tasks);
-
-  const birthdays = (S.db.contacts || [])
-    .map((c) => ({ c, b: bdayNext(c) }))
-    .filter((x) => x.b)
-    .sort((a, b) => a.b.days - b.b.days)
-    .slice(0, 8)
-    .map((x) => [esc(x.c.name), esc(x.c.rel), dfmt(x.c.bday), x.b.days, x.b.age || '', esc(x.c.mobile)]);
-  html += watch('UPCOMING BIRTHDAYS', '#0F766E', '#DDF2EE', ['Name', 'Relationship', 'Birthday', 'In (days)', 'Turning', 'Mobile'], birthdays);
-
-  return html;
+export function updateBannerHtml() {
+  const u = S.update || {};
+  const action = u.apkUrl
+    ? `<a class="btn s" href="${esc(u.apkUrl)}" target="_blank" rel="noopener">Download update</a>`
+    : '<span class="mut small">Update via your app store</span>';
+  return `<div class="updatebanner" role="status">
+    <span>Version ${esc(u.minimum || '')} or newer is required.${u.notes ? ` ${esc(u.notes)}` : ''}</span>
+    ${action}
+    <button class="linkbtn" data-act="dismiss-update">Dismiss</button>
+  </div>`;
 }
 
 /* ----------------------------------------------------------- table views */
@@ -383,17 +260,31 @@ export function settingsView() {
   return `<div class="card"><h2>Your account</h2>
       <div class="mrow"><span>Signed in as</span><b>${esc(S.me.name || '-')}</b></div>
       <div class="mrow"><span>Email</span><b>${esc(S.account.email || 'Family PIN only')}</b></div>
-      <div class="mrow"><span>Role</span><b>${esc(S.account.role === 'member' ? 'Family member' : 'Household owner')}</b></div>
+      <div class="mrow"><span>Profile</span><b>${esc(S.profile ? `${S.profile.name} · ${S.profile.role}` : '-')}</b></div>
+      <div class="mrow"><span>Your role here</span><b>${esc(S.profile ? S.profile.role : '-')}</b></div>
       <div class="fld" style="margin-top:10px"><label>Email for sign-in</label><input id="ac_email" type="email" value="${esc(S.account.email || '')}" placeholder="you@example.com"></div>
       <div class="fld"><label>Current PIN or password</label><input id="ac_current" type="password" autocomplete="current-password"></div>
       <div class="fld"><label>New password (8+ chars, letters and numbers)</label><input id="ac_next" type="password" autocomplete="new-password"></div>
       <button class="btn" data-act="save-password">Save password</button>
       <p class="mut">Members sign in with their own email; everyone shares this household's data.</p></div>
 
-  <div class="card"><h2>Family members</h2>
-    <p class="mut">The family book is shared with these accounts. Personal and office books are never shared. ${S.account.role === 'owner' ? 'You are the household owner.' : 'Only the household owner can invite or remove members.'}</p>
-    <div class="tw"><table><thead><tr><th>Member</th><th>Email</th><th>Role</th><th></th></tr></thead><tbody>${(S.members || []).map((m) => `<tr><td>${esc(m.name)}</td><td class="mut">${esc(m.email || 'PIN only')}</td><td>${stat(m.role === 'owner' ? 'Owner' : 'Member')}</td><td class="act">${S.account.role === 'owner' && m.id !== S.account.id ? `<button class="btn s r" data-act="member-del" data-id="${esc(m.id)}">Remove</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="4" class="mut">Only you so far</td></tr>'}</tbody></table></div>
-    ${S.account.role === 'owner' ? `<p style="margin-top:10px"><button class="btn" data-act="invite">Create invite code</button></p>${S.invite ? `<div class="alerts">Invite code <b>${esc(S.invite.code)}</b> — expires in 72 hours. This code is shown once, so copy it now.</div>` : ''}` : ''}
+  <div class="card"><h2>People with access to this profile</h2>
+    <p class="mut">${esc(S.profile ? S.profile.name : 'This profile')} is shared with the accounts below. Personal profiles are never shared, and office data never appears in the family profile. Roles decide what each person can do: an <b>Owner</b> manages everything, an <b>Admin</b> manages records and members, an <b>Editor</b> adds and edits, a <b>Viewer</b> only reads.</p>
+    <div class="tw"><table><thead><tr><th>Member</th><th>Email</th><th>Role</th><th></th></tr></thead><tbody>${(S.profileMembers || [])
+      .map((m) => {
+        const canManage = S.profile && (S.profile.role === 'owner' || S.profile.role === 'admin');
+        const isOwner = S.profile && m.role === 'owner';
+        const editable = canManage && !isOwner && m.id !== S.account.id;
+        return `<tr><td>${esc(m.name)}${m.id === S.account.id ? ' <span class="chip">you</span>' : ''}</td><td class="mut">${esc(m.email || 'PIN only')}</td><td>${
+          editable
+            ? `<select data-act="role-set" data-id="${esc(m.id)}" aria-label="Role for ${esc(m.name)}">${['owner', 'admin', 'editor', 'viewer']
+                .map((r) => `<option value="${r}"${r === m.role ? ' selected' : ''}>${r[0].toUpperCase() + r.slice(1)}</option>`)
+                .join('')}</select>`
+            : stat(m.role ? m.role[0].toUpperCase() + m.role.slice(1) : 'Member')
+        }</td><td class="act">${canManage && !isOwner && m.id !== S.account.id ? `<button class="btn s r" data-act="member-del" data-id="${esc(m.id)}">Remove</button>` : ''}</td></tr>`;
+      })
+      .join('') || '<tr><td colspan="4" class="mut">Only you so far</td></tr>'}</tbody></table></div>
+    ${S.profile && S.profile.role === 'owner' ? `<p style="margin-top:10px"><button class="btn" data-act="invite">Create invite code</button></p>${S.invite ? `<div class="alerts">Invite code <b>${esc(S.invite.code)}</b> — expires in 72 hours. This code is shown once, so copy it now.</div>` : ''}` : ''}
   </div>
 
   <div class="card"><h2>Appearance &amp; security</h2>
@@ -405,7 +296,14 @@ export function settingsView() {
     <p class="hint mut">The screen locks after that much inactivity and asks for your PIN or password again. Locking also clears the loaded data from this tab. <button class="linkbtn" data-act="lock">Lock now</button></p>
     <h3>Books</h3>
     <p class="hint mut">Switch with Family / Mine at the top. <b>Family</b> is the shared household book every member sees. <b>Mine</b> is private to your login — nobody else, including other family members, can read it.</p>
-    <div class="seg"><button data-act="space" data-space="family" class="${S.space === 'family' ? 'on' : ''}">Family book</button><button data-act="space" data-space="personal" class="${S.space === 'personal' ? 'on' : ''}">My book</button></div></div>
+    <div class="seg" role="group" aria-label="Profiles">${(S.profiles || [])
+      .map(
+        (p) =>
+          `<button data-act="profile" data-profile="${esc(p.id)}" class="${p.id === S.profileId ? 'on' : ''}">${esc(
+            p.name,
+          )}</button>`,
+      )
+      .join('')}</div></div>
 
     <div class="card"><h2>Household &amp; alert settings</h2>
     <div class="fld"><label>Household name</label><input id="s_household" value="${esc(S.settings.household || '')}"></div>
@@ -420,7 +318,8 @@ export function settingsView() {
     <button class="btn" data-act="push-on">Enable notifications</button>
     <button class="btn g" data-act="push-test">Send test notification</button>
     <button class="btn g" data-act="push-off">Turn off on this device</button>
-    <button class="btn g" data-act="install">Install app</button></div>
+    <button class="btn g" data-act="install">Install app</button>
+    ${S.release && S.release.apkUrl ? `<a class="btn g" href="${esc(S.release.apkUrl)}" target="_blank" rel="noopener">Android APK ${esc(S.release.version || '')}</a>` : ''}</div>
 
   <div class="card"><h2>Security</h2>
     <div class="fld"><label>Current PIN</label><input id="p_cur" type="password" inputmode="numeric" autocomplete="current-password"></div>
@@ -446,11 +345,27 @@ export function settingsView() {
   <div class="card"><h2>Calendar alerts</h2><p class="mut">Creates a calendar file with every uncompleted task, unpaid bill, insurance renewal and birthday, each with reminders (tasks: 1 day + at time; bills: 3 days, 1 day, at time; renewals: 30/15/7/1 days). Import it once into Google Calendar and re-import to update the same events. The 📅 button on each row adds a single event.</p>
     <button class="btn" data-act="ics">Download calendar alerts (.ics)</button></div>
 
-  <div class="card"><h2>Data</h2><p class="mut">Everything is stored in the planner database and synced live to every device that signs in. Export a copy any time.</p>
-    <button class="btn" data-act="backup">Download backup (.json)</button>
+  <div class="card"><h2>Backup &amp; restore</h2>
+    <p class="mut">Create an encrypted backup of <b>${esc(S.profile ? S.profile.name : 'this profile')}</b> only. The file is sealed with AES-256-GCM under a passphrase you choose here; the passphrase and the key never reach the server, so neither this app nor anyone running it can read the backup. Store it in Google Drive, OneDrive or anywhere else — it stays encrypted.</p>
+    <div class="tools"><button class="btn" data-act="backup">Create encrypted backup</button>
+    <button class="btn g" data-act="restore-backup">Restore from backup</button></div>
+    <p class="hint mut">Restoring validates the file first, shows how many records it holds, asks for confirmation, and merges by id — it never wipes the profile first. A backup only contains the profile it was made from.</p>
+  </div>
+
+  <div class="card"><h2>Data</h2><p class="mut">Everything is stored in the planner database and synced live to every device that signs in. Export a plain copy any time.</p>
+    <button class="btn g" data-act="backup-plain">Download plain JSON</button>
     <button class="btn g" data-act="sample-data">Load sample data</button>
     <button class="btn r" data-act="clear-data">Clear all data</button>
     <p class="hint mut" style="margin-top:8px">Clearing removes every contact, bill, expense, policy, task and document for all books. Accounts and settings stay.</p></div>
+
+  <div class="card"><h2>Security audit</h2>
+    <p class="mut">Sign-ins, failed sign-ins, profile switches, sharing and role changes, exports and deletions, newest first. No financial values or keys are recorded here.</p>
+    <div class="tw"><table><thead><tr><th>When</th><th>Action</th><th>Who</th><th>Target</th></tr></thead><tbody>${(S.audit || [])
+      .map(
+        (e) => `<tr><td class="mut">${esc(relative(e.ts))}</td><td>${esc(e.action)}</td><td>${esc(e.actor_name || 'system')}</td><td class="mut">${esc(e.target || e.detail || '')}</td></tr>`,
+      )
+      .join('') || '<tr><td colspan="4" class="mut">No audit events yet</td></tr>'}</tbody></table></div>
+  </div>
 
   <div class="card"><h2>Recent changes</h2><div class="tw"><table><thead><tr><th>Record</th><th>Module</th><th>Action</th><th>When</th></tr></thead><tbody>${activityRows}</tbody></table></div></div>
 
@@ -635,7 +550,7 @@ export function subscriptionsView() {
     ['ACTIVE SUBSCRIPTIONS', active.length, '#7C3AED'],
     ['MONTHLY COST', money(monthly), '#B91C1C'],
     ['YEARLY COST', money(monthly * 12), '#6D28D9'],
-    ['NEXT RENEWAL', soonest ? `${daysTo(soonest.nextDue)}d · ${soonest.service}` : '-', '#0F766E'],
+    ['NEXT RENEWAL', soonest ? `${daysTo(soonest.nextDue)}d · ${esc(soonest.service)}` : '-', '#0F766E'],
   ];
   return `<div class="bar" style="background:#7C3AED">SUBSCRIPTION OVERVIEW</div>
     <div class="grid kpis">${cards.map((c) => `<div class="kpi" style="--c:${c[2]}"><div class="l">${c[0]}</div><div class="v">${c[1]}</div></div>`).join('')}</div>

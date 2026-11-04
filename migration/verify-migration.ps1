@@ -46,8 +46,8 @@ function Note { param([string]$Text) Write-Host "       $Text" -ForegroundColor 
 function Die  { param([string]$Text, [string]$Help) Write-Host ""; Write-Host "ERROR: $Text" -ForegroundColor Red; if ($Help) { Write-Host $Help -ForegroundColor Yellow }; exit 1 }
 
 if (-not (Test-Path $Config)) { Die "config not found: $Config" "Copy migration/migration.config.example.json to migration/migration.config.json" }
-$config = Get-Content -Raw $Config | ConvertFrom-Json
-if (-not $Base) { $Base = $config.destination.baseUrl }
+$cfg = Get-Content -Raw $Config | ConvertFrom-Json
+if (-not $Base) { $Base = $cfg.destination.baseUrl }
 if (-not $Base -or $Base -match 'REPLACE-WITH') { Die "no destination base URL" "Pass -Base https://<worker>.<subdomain>.workers.dev or set destination.baseUrl in $Config" }
 $Base = $Base.TrimEnd('/')
 
@@ -55,7 +55,7 @@ if ($Snapshot) {
     if (-not (Test-Path $Snapshot)) { Die "snapshot not found: $Snapshot" }
     $snap = (Resolve-Path $Snapshot).Path
 } else {
-    $dir = Join-Path $script:Root $config.outputDir
+    $dir = Join-Path $script:Root $cfg.outputDir
     $newest = Get-ChildItem -Path $dir -Filter 'snapshot-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($null -eq $newest) { Die "no snapshot found in $dir" "Run migrate.ps1 -Step Export first" }
     $snap = $newest.FullName
@@ -73,7 +73,7 @@ function Get-DestinationCounts {
     $parts = @()
     foreach ($t in $tables) { $parts += "SELECT '$t' AS t, count(*) AS n FROM $t" }
     $sql = $parts -join ' UNION ALL '
-    $raw = & npx.cmd wrangler d1 execute $config.destination.d1DatabaseName --remote --json --command $sql 2>&1
+    $raw = & npx.cmd wrangler d1 execute $cfg.destination.d1DatabaseName --remote --json --command $sql 2>&1
     if ($LASTEXITCODE -ne 0) { Die "d1 execute failed" ($raw -join "`n") }
     $text = ($raw -join "`n")
     $start = $text.IndexOf('[')
@@ -116,9 +116,9 @@ if ($Step -eq 'Counts' -or $Step -eq 'All') {
 # ---------------------------------------------------------------- Key
 if ($Step -eq 'Key' -or $Step -eq 'All') {
     Write-Step "Encryption key against real ciphertext"
-    if (-not (Test-Path $config.keyFile)) { Fail "key file missing: $($config.keyFile)" "See BACKUP_GUIDE.md"; }
+    if (-not (Test-Path $cfg.keyFile)) { Fail "key file missing: $($cfg.keyFile)" "See BACKUP_GUIDE.md"; }
     else {
-        & node migration/snapshot-tool.mjs decrypt-check $snap $config.keyFile
+        & node migration/snapshot-tool.mjs decrypt-check $snap $cfg.keyFile
         if ($LASTEXITCODE -eq 0) { Pass "the key file matches the migrated data" }
         else { Fail "the key file does NOT decrypt the migrated data" "Stop. Find the key that was set on 2026-11-03. Do not deploy." }
     }
@@ -134,7 +134,7 @@ if ($Step -eq 'Files' -or $Step -eq 'All') {
         Pass "snapshot has no file rows"
     } else {
         Note "$($files.Count) file row(s) in the snapshot"
-        $objects = & npx.cmd wrangler r2 object list $config.destination.r2BucketName --config $config.destination.configFile 2>&1
+        $objects = & npx.cmd wrangler r2 object list $cfg.destination.r2BucketName --config $cfg.destination.configFile 2>&1
         $count = 0
         foreach ($line in @($objects)) { if ("$line" -match 'drive/') { $count++ } }
         if ($count -ge $files.Count) { Pass "destination bucket lists $count object(s)" }

@@ -24,6 +24,7 @@ import {
   isStrongPassword,
   listAiConnections,
   listFiles,
+  listNotificationsAcross,
   normaliseEmail,
   setPassword,
   verifyPassword,
@@ -62,6 +63,20 @@ import { removeSubscription, saveSubscription, sendTestPush } from './push.js';
 import { scanReceipt, testConnection } from './ai.js';
 import { encryptionReady } from './fieldcrypto.js';
 import { ICONS } from './icons.js';
+import {
+  ROLE_LABEL,
+  audit,
+  isRole,
+  listAudit,
+  listProfiles,
+  profileMembers,
+  resolveProfile,
+  setMemberRole,
+} from './profiles.js';
+
+/** Build/api version reported to clients; bump when the API contract changes. */
+const APP_VERSION = '2.1.0';
+const API_VERSION = 9;
 
 /** Content sniffing: the browser-declared type is never trusted. */
 function sniffMime(head) {
@@ -94,12 +109,22 @@ const SNAPSHOT_TABLES = [
   'files',
   'ai_connections',
   'family_invites',
+  'profiles',
+  'profile_members',
+  'audit_log',
 ];
 const SNAPSHOT_PAGE = 500;
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    // workers.dev terminates TLS, but a custom domain or a proxy in front could
+    // still forward plain HTTP. Never serve a session over a cleartext origin.
+    if (url.protocol === 'http:' && !/^(localhost|127\.|\[::1\])/.test(url.hostname)) {
+      const secure = new URL(url.toString());
+      secure.protocol = 'https:';
+      return securityHeaders(Response.redirect(secure.toString(), 308));
+    }
     try {
       // Icons are inlined in the Worker: static hosting here only accepts
       // text/JS/JSON assets, and the PWA manifest needs real PNGs.
@@ -115,12 +140,14 @@ export default {
       }
       const message = err && err.message ? err.message : String(err);
       const missingDb = /no such table|D1_ERROR|binding/i.test(message);
+      // Diagnostics stay in the Worker log. The response carries no SQL text,
+      // stack frame, binding name or column detail.
+      console.error('unhandled', pathOf(request), message.slice(0, 500));
       return json(
         {
           error: missingDb
             ? 'Database is not initialised yet. Deploy the Worker with a D1 binding named DB, then reload.'
             : 'Unexpected server error',
-          detail: message.slice(0, 300),
         },
         500,
       );
@@ -208,6 +235,13 @@ async function serveStatic(request, env, url) {
   } else if (path === '/sw.js' || path.endsWith('manifest.json') || path === '/' || path === '/index.html') {
     out.headers.set('Cache-Control', 'no-cache');
   }
+  if (path.startsWith('/download/') && path.endsWith('.apk')) {
+    // The APK is a real installable artifact, not something a browser should try
+    // to render, and it must stay fresh enough that a new release downloads.
+    out.headers.set('Content-Type', 'application/vnd.android.package-archive');
+    out.headers.set('Content-Disposition', `attachment; filename="${path.split('/').pop()}"`);
+    out.headers.set('Cache-Control', 'public, max-age=300');
+  }
   if (path === '/sw.js') out.headers.set('Service-Worker-Allowed', '/');
   return out;
 }
@@ -255,8 +289,51 @@ function spaceFor(raw, session) {
   return session.household || 'family';
 }
 
+/**
+ * The profile this request targets. `X-Profile` names a profile id directly;
+ * `X-Space` keeps the original family/personal/office vocabulary working.
+ */
 function requestSpace(request, session) {
+  const explicit = String(request.headers.get('X-Profile') || '').trim();
+  if (explicit) return explicit.slice(0, 80);
+  // EventSource cannot set headers, so the live stream names its profile in the
+  // query string. It is still validated against membership below.
+  try {
+    const fromQuery = String(new URL(request.url).searchParams.get('profile') || '').trim();
+    if (fromQuery) return fromQuery.slice(0, 80);
+  } catch {
+    /* malformed url: fall through to the header vocabulary */
+  }
   return spaceFor(request.headers.get('X-Space'), session);
+}
+
+/**
+ * Which permission a route needs. Returning null means "not profile scoped":
+ * account and device routes are handled without touching a profile at all.
+ * The mapping is the single place that decides authorisation, so a new route
+ * cannot accidentally ship without a check.
+ */
+function permissionFor(method, path) {
+  if (path.startsWith('/api/auth/')) return null;
+  if (path.startsWith('/api/push/')) return null;
+  if (path === '/api/version') return null;
+  if (path === '/api/notifications/all') return null;
+  if (path.startsWith('/api/profiles')) return null;
+  if (path === '/api/health') return null;
+  if (path === '/api/notifications/read') return 'view';
+  if (path.startsWith('/api/admin/')) return 'manage';
+  if (path === '/api/family/members' && method === 'GET') return 'view';
+  if (path.startsWith('/api/family/')) return 'manage';
+  if (path.startsWith('/api/ai/')) return method === 'GET' ? 'view' : 'manage';
+  if (path === '/api/settings') return 'manage';
+  if (path === '/api/export') return 'export';
+  if (path === '/api/audit') return 'manage';
+  if (path === '/api/backup') return 'export';
+  if (method === 'GET' || method === 'HEAD') return 'view';
+  if (method === 'DELETE') return 'delete';
+  if (method === 'PATCH') return 'update';
+  if (method === 'POST') return 'create';
+  return 'view';
 }
 
 /** The office book only holds work modules; anything else is rejected at the API. */
@@ -304,11 +381,36 @@ async function handleApi(request, env, ctx, url) {
   const method = request.method;
 
   if (path === '/api/health') {
-    return json({ ok: true, database: Boolean(env.DB), assets: Boolean(env.ASSETS), time: Date.now() });
+    return json({
+      ok: true,
+      database: Boolean(env.DB),
+      assets: Boolean(env.ASSETS),
+      storage: Boolean(env.FILES),
+      version: APP_VERSION,
+      api: API_VERSION,
+      time: Date.now(),
+    });
   }
   if (!env.DB) return json({ error: 'Database binding DB is missing' }, 503);
 
   await ensureSchema(env);
+
+  // Public: the web/Android shell compares this with what it is running to show
+  // an update notice without ever blocking the app on a bad release field.
+  if (path === '/api/version' && method === 'GET') {
+    const release = (await getMeta(env, 'release', null)) || {};
+    return json({
+      app: 'family-finance-planner',
+      version: String(release.version || APP_VERSION),
+      api: API_VERSION,
+      minimum: String(release.minimum || ''),
+      notes: String(release.notes || '').slice(0, 500),
+      apkUrl: release.apkUrl ? String(release.apkUrl).slice(0, 300) : null,
+      apkSha256: release.apkSha256 ? String(release.apkSha256).slice(0, 80) : null,
+      publishedAt: release.publishedAt || null,
+      serverTime: Date.now(),
+    });
+  }
 
   if (path === '/api/auth/status' && method === 'GET') {
     const configured = (await countUsers(env)) > 0;
@@ -345,12 +447,16 @@ async function handleApi(request, env, ctx, url) {
     }
     if (invite) await redeemInvite(env, invite.code, user.id);
     const token = await createSession(env, user.id, request);
+    await audit(env, { action: 'auth.login', actor: user.id, detail: 'signup' });
     return json({ ok: true, user: { name: user.name, email: user.email } }, 200, { 'Set-Cookie': sessionCookie(token, url) });
   }
 
   if (path === '/api/auth/setup' && method === 'POST') {
     if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
     if ((await countUsers(env)) > 0) throw new HttpError(403, 'This planner is already set up');
+    if (await hitRateLimit(env, `setup:${clientIp(request)}`, 5, 3600_000)) {
+      throw new HttpError(429, 'Too many setup attempts. Try again later.');
+    }
     const body = await readJson(request);
     if (!PIN_RE.test(String(body.pin || ''))) throw new HttpError(400, 'PIN must be 4-12 digits');
     const user = await createUser(env, body.name, String(body.pin));
@@ -373,44 +479,63 @@ async function handleApi(request, env, ctx, url) {
       user = await verifyPassword(env, body.email, String(body.password || ''));
       if (!user) {
         await recordAuthFailure(env, ip);
+        await audit(env, { action: 'auth.login_failed', detail: 'password' });
         throw new HttpError(401, 'Email or password is incorrect');
       }
     } else {
       const pin = String(body.pin || '');
       if (!PIN_RE.test(pin)) {
         await recordAuthFailure(env, ip);
+        await audit(env, { action: 'auth.login_failed', detail: 'pin-format' });
         throw new HttpError(401, 'Incorrect PIN');
       }
       user = await verifyPin(env, pin);
       if (!user) {
         await recordAuthFailure(env, ip);
+        await audit(env, { action: 'auth.login_failed', detail: 'pin' });
         throw new HttpError(401, 'Incorrect PIN');
       }
     }
     await clearAuthFailures(env, ip);
     const token = await createSession(env, user.id, request);
+    await audit(env, { action: 'auth.login', actor: user.id, detail: body.email ? 'password' : 'pin' });
     return json({ ok: true, user }, 200, { 'Set-Cookie': sessionCookie(token, url) });
   }
 
   if (path === '/api/auth/logout' && method === 'POST') {
     if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    const session = await getSession(env, readCookie(request, COOKIE));
     await deleteSession(env, readCookie(request, COOKIE));
+    if (session) await audit(env, { action: 'auth.logout', actor: session.userId });
     return json({ ok: true }, 200, { 'Set-Cookie': clearCookie(url) });
   }
 
   if (path === '/api/auth/lock' && method === 'POST') {
     if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    const session = await getSession(env, readCookie(request, COOKIE));
     await deleteSession(env, readCookie(request, COOKIE));
+    if (session) await audit(env, { action: 'auth.lock', actor: session.userId });
     return json({ ok: true }, 200, { 'Set-Cookie': clearCookie(url) });
   }
 
   const { session, token } = await requireUser(request, env, url);
-  const space = requestSpace(request, session);
 
   // Every authenticated mutation shares a per-user allowance; auth routes have
   // their own stricter limiter and are excluded here.
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && !path.startsWith('/api/auth/')) {
     await enforceWriteLimit(env, session.userId);
+  }
+
+  // Authorise before any handler runs. The profile id comes from the client, so
+  // membership is proved against profile_members every single request; a forged
+  // or foreign id answers 404 instead of leaking another profile's data.
+  const requested = requestSpace(request, session);
+  const need = permissionFor(method, path);
+  let profile = null;
+  let space = requested;
+  if (need) {
+    profile = await resolveProfile(env, session, requested, need);
+    space = profile.id;
   }
 
   if (path === '/api/auth/password' && method === 'POST') {
@@ -424,23 +549,97 @@ async function handleApi(request, env, ctx, url) {
     if (!byPassword && !byPin) throw new HttpError(401, 'Current password is incorrect');
     await setPassword(env, session.userId, email, String(body.next));
     await deleteUserSessions(env, session.userId, session.sessionId);
+    await audit(env, { action: 'auth.password', actor: session.userId });
     return json({ ok: true, email });
   }
 
   if (path === '/api/auth/account' && method === 'GET') {
     const creds = await credentialsFor(env, session.userId);
+    const profiles = await listProfiles(env, session.userId);
+    const current = profiles.find((p) => p.id === (session.household || 'family')) || profiles[0] || null;
     return json({
       name: session.name,
       email: creds ? creds.email : null,
-      role: (await memberRole(env, session.userId)) || (creds ? 'member' : 'owner'),
+      role: current ? current.role : 'viewer',
+      roles: ROLE_LABEL,
       encryption: await encryptionReady(env),
       spaces: ['family', 'personal', 'office'],
+      profiles,
       storage: Boolean(env.FILES),
-      ai: Boolean(await activeAiConnection(env)),
+      ai: Boolean(await activeAiConnection(env, session.household || 'family')),
+      version: APP_VERSION,
+      api: API_VERSION,
+    });
+  }
+
+  /* ----------------------------------------------------------- profiles */
+
+  if (path === '/api/profiles' && method === 'GET') {
+    const profiles = await listProfiles(env, session.userId);
+    return json({ profiles, roles: ROLE_LABEL });
+  }
+
+  if (path === '/api/profiles/switch' && method === 'POST') {
+    const body = await readJson(request);
+    // resolveProfile throws 404 for a profile the account cannot see, so this
+    // cannot be used to probe for other households' profile ids.
+    const target = await resolveProfile(env, session, String(body.profile || ''), 'view');
+    await audit(env, {
+      action: 'profile.switch',
+      actor: session.userId,
+      profileId: target.id,
+      target: target.kind,
+    });
+    return json({
+      ok: true,
+      profile: { id: target.id, kind: target.kind, name: target.name, role: target.role },
+    });
+  }
+
+  const profileMembersMatch = path.match(/^\/api\/profiles\/([^/]{1,120})\/members(?:\/([^/]{1,64}))?$/);
+  if (profileMembersMatch) {
+    const profileId = decodeURIComponent(profileMembersMatch[1]);
+    const targetId = profileMembersMatch[2] ? decodeURIComponent(profileMembersMatch[2]) : null;
+    const own = await resolveProfile(env, session, profileId, method === 'GET' ? 'view' : 'manage');
+    if (method === 'GET' && !targetId) {
+      return json({ members: await profileMembers(env, own.id), profile: { id: own.id, name: own.name, kind: own.kind }, me: session.userId });
+    }
+    if (method === 'PATCH' && targetId) {
+      const body = await readJson(request);
+      if (!isRole(body.role)) throw new HttpError(400, 'Unknown role');
+      const out = await setMemberRole(env, own.id, session.userId, targetId, String(body.role));
+      await audit(env, {
+        action: 'profile.role',
+        actor: session.userId,
+        profileId: own.id,
+        target: targetId,
+        detail: out.role,
+      });
+      return json({ ok: true, ...out });
+    }
+  }
+
+  if (path === '/api/audit' && method === 'GET') {
+    return json({ events: await listAudit(env, space, url.searchParams.get('limit') || 60) });
+  }
+
+  if (path === '/api/notifications/all' && method === 'GET') {
+    const profiles = await listProfiles(env, session.userId);
+    const readable = profiles.filter((p) => p.role !== undefined);
+    const rows = await listNotificationsAcross(env, readable.map((p) => p.id), 100);
+    const names = Object.fromEntries(readable.map((p) => [p.id, p.name]));
+    return json({
+      notifications: rows.map((n) => ({ ...n, profile_name: names[n.space] || n.space })),
+      total: rows.filter((n) => !n.read_at).length,
+      profiles: readable.map((p) => ({ id: p.id, name: p.name, kind: p.kind, unread: p.unread })),
     });
   }
 
   if (path === '/api/auth/pin' && method === 'POST') {
+    // The PIN unlocks the whole household, so rewriting it needs the same right
+    // as any other household-wide change. A viewer who knows the current PIN
+    // must not be able to lock the owner out.
+    await resolveProfile(env, session, session.household || 'family', 'manage');
     const body = await readJson(request);
     if (!PIN_RE.test(String(body.newPin || ''))) throw new HttpError(400, 'PIN must be 4-12 digits');
     const ok = await verifyPin(env, String(body.currentPin || ''));
@@ -463,7 +662,16 @@ async function handleApi(request, env, ctx, url) {
     const since = Number(url.searchParams.get('since') || 0);
     ctx.waitUntil(runBackground(env));
     const state = await getState(env, Number.isFinite(since) ? since : 0, space);
-    return json({ ...state, me: { name: session.name }, spaces: ['family', 'personal'] });
+    const profiles = await listProfiles(env, session.userId);
+    return json({
+      ...state,
+      me: { name: session.name },
+      spaces: ['family', 'personal', 'office'],
+      profiles,
+      profile: { id: profile.id, kind: profile.kind, name: profile.name, role: profile.role },
+      permissions: ['view', 'create', 'update', 'delete', 'export', 'manage', 'share'],
+      version: APP_VERSION,
+    });
   }
 
   if (path === '/api/activity' && method === 'GET') {
@@ -487,19 +695,21 @@ async function handleApi(request, env, ctx, url) {
 
   if (path === '/api/push/subscribe' && method === 'POST') {
     const body = await readJson(request);
-    const saved = await saveSubscription(env, body, request.headers.get('User-Agent'));
+    const saved = await saveSubscription(env, body, request.headers.get('User-Agent'), session.userId);
     if (!saved) throw new HttpError(400, 'Invalid push subscription');
     return json({ ok: true });
   }
 
   if (path === '/api/push/unsubscribe' && method === 'POST') {
     const body = await readJson(request);
-    await removeSubscription(env, body.endpoint);
+    // Scoped to the caller: an endpoint id belonging to another account is a
+    // no-op instead of a cross-tenant delete.
+    await removeSubscription(env, body.endpoint, session.userId);
     return json({ ok: true });
   }
 
   if (path === '/api/push/test' && method === 'POST') {
-    return json(await sendTestPush(env));
+    return json(await sendTestPush(env, session.userId));
   }
 
   if (path === '/api/settings' && method === 'POST') {
@@ -511,7 +721,10 @@ async function handleApi(request, env, ctx, url) {
       currency: 'INR',
       household: String(body.household || '').slice(0, 80),
     };
-    await setMeta(env, 'settings', clean);
+    // Settings are per profile so one household's contact number and alert
+    // channel never surface inside another profile's screens.
+    await setMeta(env, `settings:${space}`, clean);
+    await audit(env, { action: 'settings.update', actor: session.userId, profileId: space });
     return json({ ok: true, settings: clean });
   }
 
@@ -536,6 +749,15 @@ async function handleApi(request, env, ctx, url) {
           }
         : null;
     const stats = await bulkCreate(env, space, collection, body.docs || [], session.userId, dedupeKey);
+    if (body.restore === true) {
+      await audit(env, {
+        action: 'data.restore',
+        actor: session.userId,
+        profileId: space,
+        target: collection,
+        detail: `${stats.added} rows`,
+      });
+    }
     ctx.waitUntil(runBackground(env));
     return json(stats);
   }
@@ -553,17 +775,48 @@ async function handleApi(request, env, ctx, url) {
     }
     if (method === 'DELETE') {
       const out = await deleteRecord(env, space, collection, id, session.userId);
+      await audit(env, {
+        action: 'record.delete',
+        actor: session.userId,
+        profileId: space,
+        target: `${collection}/${id}`,
+      });
       ctx.waitUntil(runBackground(env));
       return json(out);
     }
   }
 
   if (path === '/api/export' && method === 'GET') {
-    const out = { exportedAt: new Date().toISOString(), settings: await getMeta(env, 'settings', null), data: {} };
+    // A stolen session must not be able to pull the ledger thousands of times.
+    if (await hitRateLimit(env, `x:${session.userId}`, 30, 3600_000)) {
+      throw new HttpError(429, 'Too many exports in the last hour. Wait before exporting again.');
+    }
+    const out = {
+      exportedAt: new Date().toISOString(),
+      profile: { id: profile.id, kind: profile.kind, name: profile.name },
+      settings: await getMeta(env, `settings:${space}`, null),
+      data: {},
+    };
     for (const name of COLLECTION_NAMES) out.data[name] = await listCollection(env, space, name);
+    await audit(env, { action: 'data.export', actor: session.userId, profileId: space });
     return json(out, 200, {
       'Content-Disposition': `attachment; filename="family-finance-backup-${new Date().toISOString().slice(0, 10)}.json"`,
     });
+  }
+
+  // Records that a backup was created or restored. The backup itself is
+  // encrypted in the browser, so the worker only ever sees this audit line.
+  if (path === '/api/backup' && method === 'POST') {
+    const body = await readJson(request);
+    const restore = body.action === 'restore';
+    await audit(env, {
+      action: restore ? 'backup.restore' : 'backup.create',
+      actor: session.userId,
+      profileId: space,
+      target: String(body.target || 'download').slice(0, 60),
+      detail: `${Math.min(Number(body.bytes) || 0, 1e9)} bytes`,
+    });
+    return json({ ok: true });
   }
 
   /* ------------------------------------------------------------ drive */
@@ -640,24 +893,24 @@ async function handleApi(request, env, ctx, url) {
   /* --------------------------------------------------------- AI tools */
 
   if (path === '/api/ai/connections' && method === 'GET') {
-    const rows = await listAiConnections(env);
+    const rows = await listAiConnections(env, space);
     return json({ connections: rows.map((r) => ({ ...r, apiKey: undefined, masked: '••••' })) });
   }
 
   if (path === '/api/ai/connections' && method === 'POST') {
     const body = await readJson(request);
-    const created = await addAiConnection(env, body, session.userId);
+    const created = await addAiConnection(env, body, session.userId, space);
     return json({ ok: true, connection: created });
   }
 
   const aiMatch = path.match(/^\/api\/ai\/connections\/([0-9a-f-]{36})(\/test)?$/);
   if (aiMatch) {
     if (method === 'DELETE' && !aiMatch[2]) {
-      await deleteAiConnection(env, aiMatch[1]);
+      await deleteAiConnection(env, aiMatch[1], space);
       return json({ ok: true });
     }
     if (method === 'POST' && aiMatch[2]) {
-      const connection = await activeAiConnection(env);
+      const connection = await activeAiConnection(env, space);
       if (!connection || connection.id !== aiMatch[1]) throw new HttpError(404, 'Connection not found');
       return json(await testConnection(connection));
     }
@@ -667,27 +920,41 @@ async function handleApi(request, env, ctx, url) {
 
   if (path === '/api/family/members' && method === 'GET') {
     return json({
-      members: await listMembers(env, session.household || 'family'),
+      members: await profileMembers(env, space),
       me: session.userId,
-      role: await memberRole(env, session.userId),
-      household: session.household || 'family',
+      role: profile.role,
+      household: space,
+      permissions: {
+        manage: profile.role === 'owner' || profile.role === 'admin',
+        share: profile.role === 'owner',
+      },
     });
   }
 
   if (path === '/api/family/invite' && method === 'POST') {
-    if ((await memberRole(env, session.userId)) !== 'owner') {
-      throw new HttpError(403, 'Only the household owner can invite members');
-    }
-    return json({ ok: true, ...(await createInvite(env, session.userId, session.household || 'family')) });
+    const invite = await createInvite(env, session.userId, space);
+    await audit(env, {
+      action: 'share.invite',
+      actor: session.userId,
+      profileId: space,
+      target: invite.code ? 'code-issued' : 'failed',
+    });
+    return json({ ok: true, ...invite });
   }
 
   const memberMatch = path.match(/^\/api\/family\/members\/([0-9a-f-]{36})$/);
   if (memberMatch && method === 'DELETE') {
-    if ((await memberRole(env, session.userId)) !== 'owner') {
-      throw new HttpError(403, 'Only the household owner can remove members');
+    if (profile.owner_id && memberMatch[1] === profile.owner_id) {
+      throw new HttpError(400, 'The profile owner cannot be removed');
     }
     if (memberMatch[1] === session.userId) throw new HttpError(400, 'You cannot remove your own account');
-    await removeMember(env, memberMatch[1], session.household || 'family');
+    await removeMember(env, memberMatch[1], space, session.userId);
+    await audit(env, {
+      action: 'share.revoke',
+      actor: session.userId,
+      profileId: space,
+      target: memberMatch[1],
+    });
     return json({ ok: true });
   }
 
@@ -695,7 +962,11 @@ async function handleApi(request, env, ctx, url) {
 
   // Owner-only, read-only dump of everything a migration must carry. Deployed only
   // for the duration of the move; see migration/SECURITY_CHECKLIST.md.
+  // This dump contains password hashes and the VAPID private key, so it only
+  // exists while a migration is explicitly switched on. Without the flag the
+  // route behaves as if it were never deployed.
   if (path === '/api/admin/snapshot' && method === 'GET') {
+    if (String(env.MIGRATION_MODE || '') !== '1') throw new HttpError(404, 'Not found');
     if ((await memberRole(env, session.userId)) !== 'owner') {
       throw new HttpError(403, 'Only the household owner can export a snapshot');
     }
@@ -709,26 +980,39 @@ async function handleApi(request, env, ctx, url) {
   if (path === '/api/admin/reset' && method === 'POST') {
     await wipeRecords(env, space);
     await seedDatabase(env, session.userId, space);
+    await audit(env, { action: 'data.restore', actor: session.userId, profileId: space, target: 'reset' });
     return json({ ok: true });
   }
 
   if (path === '/api/admin/clear' && method === 'POST') {
     await wipeRecords(env, space);
+    await audit(env, { action: 'data.clear', actor: session.userId, profileId: space });
     return json({ ok: true });
   }
 
   if (path === '/api/admin/sample' && method === 'POST') {
     await wipeRecords(env, space);
     await seedDatabase(env, session.userId, space);
+    await audit(env, { action: 'data.restore', actor: session.userId, profileId: space, target: 'sample' });
     return json({ ok: true });
   }
 
   if (path === '/api/events' && method === 'GET') {
     const since = Number(url.searchParams.get('since') || 0);
-    return streamEvents(env, since, spaceFor(url.searchParams.get('space'), session) || 'family');
+    // The stream follows the profile this request was authorised for; a `space`
+    // query parameter is intentionally ignored so it cannot select another book.
+    return streamEvents(env, since, space);
   }
 
   throw new HttpError(404, 'Not found');
+}
+
+function pathOf(request) {
+  try {
+    return new URL(request.url).pathname;
+  } catch {
+    return '?';
+  }
 }
 
 /**
@@ -762,6 +1046,17 @@ async function exportSnapshot(env) {
   tables.files = await all('SELECT * FROM files ORDER BY created_at, id');
   tables.ai_connections = await all('SELECT * FROM ai_connections ORDER BY created_at, id');
   tables.family_invites = await all('SELECT * FROM family_invites ORDER BY expires_at, code');
+  tables.profiles = await all('SELECT * FROM profiles ORDER BY created_at, id');
+  tables.profile_members = await pageLoop(
+    `SELECT * FROM profile_members ORDER BY profile_id, user_id LIMIT ${SNAPSHOT_PAGE}`,
+    `SELECT * FROM profile_members WHERE (profile_id, user_id) > (?, ?) ORDER BY profile_id, user_id LIMIT ${SNAPSHOT_PAGE}`,
+    (row) => [row.profile_id, row.user_id],
+  );
+  tables.audit_log = await pageLoop(
+    `SELECT * FROM audit_log ORDER BY id LIMIT ${SNAPSHOT_PAGE}`,
+    `SELECT * FROM audit_log WHERE id > ? ORDER BY id LIMIT ${SNAPSHOT_PAGE}`,
+    (row) => [row.id],
+  );
 
   tables.records = await pageLoop(
     `SELECT * FROM records ORDER BY space, collection, id LIMIT ${SNAPSHOT_PAGE}`,
