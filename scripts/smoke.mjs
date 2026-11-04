@@ -209,11 +209,34 @@ ok('weak password rejected', weak.status === 400, `got ${weak.status}`);
 const inviteOut = await call('/api/family/invite', { method: 'POST' });
 ok('owner can create an invite code', inviteOut.status === 200 && Boolean(inviteOut.data.code), JSON.stringify(inviteOut.data));
 
-const noInvite = await call('/api/auth/signup', {
+const badCode = await call('/api/auth/signup', {
   method: 'POST',
-  body: { email: `nobody${Date.now()}@example.com`, password: 'Passw0rd123' },
+  body: { email: `badcode${Date.now()}@example.com`, password: 'Passw0rd123', code: 'NOPE0000' },
 });
-ok('signup without an invite is refused', noInvite.status === 403, `got ${noInvite.status}`);
+ok('a wrong invite code is rejected', badCode.status === 400, `got ${badCode.status}`);
+
+// No code at all: the account becomes the owner of a brand-new private planner.
+const soloEmail = `solo${Date.now()}@example.com`;
+const solo = await call('/api/auth/signup', {
+  method: 'POST',
+  body: { name: 'Solo', email: soloEmail, password: 'Passw0rd123' },
+});
+ok('signup works without an invite', solo.status === 200 && solo.data.user?.email === soloEmail, JSON.stringify(solo.data));
+
+const soloAccount = await call('/api/auth/account');
+ok('a solo account owns its planner', soloAccount.status === 200 && soloAccount.data.role === 'owner', JSON.stringify(soloAccount.data));
+
+const soloState = await call('/api/state?since=0');
+ok(
+  'a new planner starts empty and cannot see the household book',
+  soloState.status === 200 && (soloState.data.collections.payments || []).length === 0,
+  `payments=${(soloState.data.collections?.payments || []).length}`,
+);
+
+// Return to the original household owner for the remaining checks.
+await call('/api/auth/logout', { method: 'POST' });
+const backIn = await call('/api/auth/login', { method: 'POST', body: { pin: process.env.FFP_PIN || '135790' } });
+ok('owner session restored after the solo signup', backIn.status === 200, JSON.stringify(backIn.data));
 
 const memberEmail = `member${Date.now()}@example.com`;
 const signup = await call('/api/auth/signup', {

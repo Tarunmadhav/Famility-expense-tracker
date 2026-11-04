@@ -6,7 +6,7 @@ import { SEED, SETTINGS } from './seed.js';
 import { generateVapidKeys, sendPushToAll } from './push.js';
 import { protectDoc, revealDoc, encryptionReady } from './fieldcrypto.js';
 
-export const SCHEMA_VERSION = '7';
+export const SCHEMA_VERSION = '8';
 // 100 000 is the maximum iteration count the production Workers runtime supports
 // for PBKDF2-SHA256; attempts are additionally rate limited (8 per 15 minutes per IP).
 const PBKDF2_ITERATIONS = 100000;
@@ -65,6 +65,22 @@ async function migrateV6(env) {
     await env.DB.prepare(
       `UPDATE users SET role = 'owner' WHERE id = (SELECT id FROM users ORDER BY created_at LIMIT 1)`,
     ).run();
+  }
+  // Every account belongs to exactly one household. Existing rows keep the
+  // original shared book ('family'); self-serve signups get 'h:<their id>'.
+  if (!(await hasColumn(env, 'users', 'household'))) {
+    try {
+      await env.DB.prepare(`ALTER TABLE users ADD COLUMN household TEXT NOT NULL DEFAULT 'family'`).run();
+    } catch {
+      /* already present */
+    }
+  }
+  if (!(await hasColumn(env, 'family_invites', 'household'))) {
+    try {
+      await env.DB.prepare(`ALTER TABLE family_invites ADD COLUMN household TEXT NOT NULL DEFAULT 'family'`).run();
+    } catch {
+      /* already present */
+    }
   }
 }
 
@@ -211,7 +227,7 @@ export async function createUser(env, name, pin) {
   // until an owner invites them.
   const isFirst = (await countUsers(env)) === 0;
   await env.DB.prepare(
-    `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at, role) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at, role, household) VALUES (?, ?, ?, ?, ?, ?, ?, 'family')`,
   )
     .bind(
       id,
@@ -257,7 +273,7 @@ export function isEmail(email) {
 }
 
 /** Creates a member account that signs in with email + password (no PIN). */
-export async function createEmailUser(env, email, password, name) {
+export async function createEmailUser(env, email, password, name, household = null) {
   const clean = normaliseEmail(email);
   const existing = await env.DB.prepare(`SELECT user_id FROM credentials WHERE email = ?`).bind(clean).first();
   if (existing) throw new HttpError(409, 'That email already has an account');
@@ -265,15 +281,18 @@ export async function createEmailUser(env, email, password, name) {
   const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
   const hash = await derivePin(password, salt, PBKDF2_ITERATIONS);
   const displayName = String(name || clean.split('@')[0]).trim().slice(0, 60) || 'Member';
+  // Without an invite the account starts its own private planner and owns it.
+  const home = household || `h:${userId}`;
+  const role = household ? 'member' : 'owner';
   await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at) VALUES (?, ?, '', '', ?, ?)`,
-    ).bind(userId, displayName, PBKDF2_ITERATIONS, Date.now()),
+      `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at, role, household) VALUES (?, ?, '', '', ?, ?, ?, ?)`,
+    ).bind(userId, displayName, PBKDF2_ITERATIONS, Date.now(), role, home),
     env.DB.prepare(
       `INSERT INTO credentials (user_id, email, password_hash, password_salt, iterations, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
     ).bind(userId, clean, hash, salt, PBKDF2_ITERATIONS, Date.now()),
   ]);
-  return { id: userId, name: displayName, email: clean };
+  return { id: userId, name: displayName, email: clean, household: home, role };
 }
 
 export async function verifyPassword(env, email, password) {
@@ -309,11 +328,14 @@ export async function credentialsFor(env, userId) {
 
 /* ------------------------------------------------- family membership */
 
-export async function listMembers(env) {
+export async function listMembers(env, household = 'family') {
   const res = await env.DB.prepare(
     `SELECT u.id, u.name, u.role, u.created_at, c.email
-       FROM users u LEFT JOIN credentials c ON c.user_id = u.id ORDER BY u.created_at`,
-  ).all();
+       FROM users u LEFT JOIN credentials c ON c.user_id = u.id
+      WHERE u.household = ? ORDER BY u.created_at`,
+  )
+    .bind(household)
+    .all();
   return res.results || [];
 }
 
@@ -322,13 +344,13 @@ export async function memberRole(env, userId) {
   return row ? row.role : null;
 }
 
-export async function createInvite(env, userId) {
+export async function createInvite(env, userId, household = 'family') {
   const code = randomToken(9).replace(/[-_]/g, '').slice(0, 10).toUpperCase();
   const expiresAt = Date.now() + 72 * 3600000;
   await env.DB.prepare(
-    `INSERT INTO family_invites (code, created_by, role, expires_at) VALUES (?, ?, 'member', ?)`,
+    `INSERT INTO family_invites (code, created_by, role, expires_at, household) VALUES (?, ?, 'member', ?, ?)`,
   )
-    .bind(code, userId, expiresAt)
+    .bind(code, userId, expiresAt, household)
     .run();
   return { code, expiresAt };
 }
@@ -342,13 +364,28 @@ export async function checkInvite(env, code) {
 }
 
 export async function redeemInvite(env, code, userId) {
-  await env.DB.prepare(`UPDATE family_invites SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL`)
-    .bind(userId, Date.now(), String(code).toUpperCase())
-    .run();
+  const clean = String(code || '').trim().toUpperCase();
+  const row = await env.DB.prepare(
+    `SELECT household, role FROM family_invites WHERE code = ? AND used_by IS NULL`,
+  )
+    .bind(clean)
+    .first();
+  if (!row) return null;
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE family_invites SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL`)
+      .bind(userId, Date.now(), clean),
+    env.DB.prepare(`UPDATE users SET household = ?, role = ? WHERE id = ?`)
+      .bind(row.household || 'family', row.role || 'member', userId),
+  ]);
+  return row;
 }
 
 /** Removing a member also deletes their personal and office books and their sessions. */
-export async function removeMember(env, userId) {
+export async function removeMember(env, userId, household = null) {
+  if (household) {
+    const target = await env.DB.prepare(`SELECT household FROM users WHERE id = ?`).bind(userId).first();
+    if (!target || (target.household || 'family') !== household) throw new HttpError(404, 'Member not found');
+  }
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM credentials WHERE user_id = ?`).bind(userId),
@@ -455,7 +492,7 @@ export async function getSession(env, token) {
   if (!token) return null;
   const id = await sha256Hex(token);
   const row = await env.DB.prepare(
-    `SELECT s.id, s.expires_at, u.id AS user_id, u.name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ?`,
+    `SELECT s.id, s.expires_at, u.id AS user_id, u.name, u.role, u.household FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ?`,
   )
     .bind(id)
     .first();
@@ -464,7 +501,13 @@ export async function getSession(env, token) {
     await env.DB.prepare(`DELETE FROM sessions WHERE id = ?`).bind(id).run();
     return null;
   }
-  return { sessionId: row.id, userId: row.user_id, name: row.name };
+  return {
+    sessionId: row.id,
+    userId: row.user_id,
+    name: row.name,
+    role: row.role || 'member',
+    household: row.household || 'family',
+  };
 }
 
 export async function deleteSession(env, token) {
@@ -1008,11 +1051,11 @@ async function afterWrite(env, space, collection, doc, id) {
 
 /* --------------------------------------------------------------- seeding */
 
-export async function seedDatabase(env, actor = 'system') {
+export async function seedDatabase(env, actor = 'system', space = 'family') {
   for (const name of Object.keys(SEED)) {
     if (!COLLECTIONS[name]) continue;
     const rows = SEED[name];
-    for (const row of rows) await createRecord(env, 'family', name, row, actor);
+    for (const row of rows) await createRecord(env, space, name, row, actor);
   }
   await setMeta(env, 'settings', SETTINGS);
   await setMeta(env, 'family_seed', Date.now());

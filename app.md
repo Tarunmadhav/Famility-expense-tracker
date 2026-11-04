@@ -73,9 +73,11 @@ curl http://127.0.0.1:8787/api/health
 ### First login
 
 - The **first account you create on an empty database becomes the owner**.
-- Every later account needs an **invite code** made by the owner in
-  *Settings → Members → Create invite*. Without a code, signup answers
-  `403 An invite code from the household owner is required`.
+- **Signing up needs no invite.** Leave the invite code blank and the account becomes
+  the owner of a brand-new, private planner — your own Family, Personal and Office books.
+- To share someone else's family book, enter the **invite code** their owner creates in
+  *Settings → Members → Create invite*. The code is optional; a wrong or expired code is
+  rejected with `400` rather than silently ignored.
 - The app is PIN-locked. Set a PIN you will remember; forgetting it does not lose data,
   but you must sign in again to reset it.
 
@@ -110,7 +112,13 @@ collection whitelist and the per-user write limit.
 | Personal | only you (`u:<your id>`) | `X-Space: personal` |
 | Office | only you (`o:<your id>`), work modules only | `X-Space: office` |
 
-The server decides the real book from your session; the header only selects which one.
+Each account belongs to exactly one **household**, and the shared family book is scoped to
+it: two people who sign up without invites get separate planners and never see each
+other's rows. The account that creates a household owns it and is the only one who can
+invite or remove its members.
+
+The server decides the real book and household from your session; the header only selects
+which book inside it.
 Office accepts **diary, contacts, expenses** and rejects anything else with `400`.
 Every write is limited to **120 changes per minute per account**; past that you get `429`.
 
@@ -298,7 +306,8 @@ git log --oneline -5       # recent history
 | --- | --- | --- |
 | `npm ci` fails with `EPERM ... workerd.exe` | the local Worker is still running | stop `npm run dev:api`, run `npm ci` again |
 | `worker did not start` in CI | port 8787 busy or build stale | rerun `npm run build`, check nothing else uses 8787 |
-| `403 An invite code … required` | signup is invite-only | owner creates a code in Settings → Members |
+| `400 That invite code is not valid or has expired` | wrong, used or expired code | leave the code blank to start your own planner, or ask the owner for a fresh one |
+| Signed up without a code and see no data | that is expected | you own a new empty planner; use an invite code to join an existing household |
 | `429 Too many changes in a minute` | write limit (120/min) | wait a minute |
 | `Release signing is not configured` | env vars missing | export the four variables, see section 6 |
 | Gradle: `SDK location not found` | no `local.properties` | add `sdk.dir=…` as in section 6 |

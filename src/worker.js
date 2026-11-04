@@ -230,7 +230,8 @@ function spaceFor(raw, session) {
   const value = String(raw || '').toLowerCase();
   if (value === 'personal') return `u:${session.userId}`;
   if (value === 'office') return `o:${session.userId}`;
-  return 'family';
+  // Each household keeps its own shared book; 'family' is the original one.
+  return session.household || 'family';
 }
 
 function requestSpace(request, session) {
@@ -309,16 +310,19 @@ async function handleApi(request, env, ctx, url) {
     if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email address');
     if (!isStrongPassword(body.password)) throw new HttpError(400, 'Password needs at least 8 characters with a letter and a number');
     if (await emailTaken(env, email)) throw new HttpError(409, 'That email already has an account');
-    const invite = await checkInvite(env, body.code);
-    if (!invite) throw new HttpError(403, 'An invite code from the household owner is required');
+    // An invite code is optional: with one you join that household, without one
+    // you start a private planner of your own.
+    const code = String(body.code || '').trim();
+    const invite = code ? await checkInvite(env, code) : null;
+    if (code && !invite) throw new HttpError(400, 'That invite code is not valid or has expired');
     let user;
     try {
-      user = await createEmailUser(env, email, String(body.password), body.name);
+      user = await createEmailUser(env, email, String(body.password), body.name, invite ? invite.household : null);
     } catch (err) {
       await recordAuthFailure(env, ip);
       throw err;
     }
-    await redeemInvite(env, invite.code, user.id);
+    if (invite) await redeemInvite(env, invite.code, user.id);
     const token = await createSession(env, user.id, request);
     return json({ ok: true, user: { name: user.name, email: user.email } }, 200, { 'Set-Cookie': sessionCookie(token, url) });
   }
@@ -642,9 +646,10 @@ async function handleApi(request, env, ctx, url) {
 
   if (path === '/api/family/members' && method === 'GET') {
     return json({
-      members: await listMembers(env),
+      members: await listMembers(env, session.household || 'family'),
       me: session.userId,
       role: await memberRole(env, session.userId),
+      household: session.household || 'family',
     });
   }
 
@@ -652,7 +657,7 @@ async function handleApi(request, env, ctx, url) {
     if ((await memberRole(env, session.userId)) !== 'owner') {
       throw new HttpError(403, 'Only the household owner can invite members');
     }
-    return json({ ok: true, ...(await createInvite(env, session.userId)) });
+    return json({ ok: true, ...(await createInvite(env, session.userId, session.household || 'family')) });
   }
 
   const memberMatch = path.match(/^\/api\/family\/members\/([0-9a-f-]{36})$/);
@@ -661,30 +666,30 @@ async function handleApi(request, env, ctx, url) {
       throw new HttpError(403, 'Only the household owner can remove members');
     }
     if (memberMatch[1] === session.userId) throw new HttpError(400, 'You cannot remove your own account');
-    await removeMember(env, memberMatch[1]);
+    await removeMember(env, memberMatch[1], session.household || 'family');
     return json({ ok: true });
   }
 
   if (path === '/api/admin/reset' && method === 'POST') {
-    await wipeRecords(env);
-    await seedDatabase(env, session.userId);
+    await wipeRecords(env, space);
+    await seedDatabase(env, session.userId, space);
     return json({ ok: true });
   }
 
   if (path === '/api/admin/clear' && method === 'POST') {
-    await wipeRecords(env);
+    await wipeRecords(env, space);
     return json({ ok: true });
   }
 
   if (path === '/api/admin/sample' && method === 'POST') {
-    await wipeRecords(env);
-    await seedDatabase(env, session.userId);
+    await wipeRecords(env, space);
+    await seedDatabase(env, session.userId, space);
     return json({ ok: true });
   }
 
   if (path === '/api/events' && method === 'GET') {
     const since = Number(url.searchParams.get('since') || 0);
-    return streamEvents(env, since, spaceFor(url.searchParams.get('space'), session));
+    return streamEvents(env, since, spaceFor(url.searchParams.get('space'), session) || 'family');
   }
 
   throw new HttpError(404, 'Not found');

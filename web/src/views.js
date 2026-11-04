@@ -544,7 +544,8 @@ export function signupFormHtml(message = '') {
       <div class="fld"><label for="su_email">Email</label><input id="su_email" type="email" autocomplete="username" placeholder="you@example.com" required></div>
       <div class="fld"><label for="su_password">Password</label><input id="su_password" type="password" autocomplete="new-password" placeholder="At least 8 characters, letters and numbers" required></div>
       <div class="fld"><label for="su_password2">Repeat password</label><input id="su_password2" type="password" autocomplete="new-password" required></div>
-      <div class="fld"><label for="su_code">Invite code</label><input id="su_code" maxlength="12" autocapitalize="characters" placeholder="Ask the household owner" required></div>
+      <div class="fld"><label for="su_code">Invite code (optional)</label><input id="su_code" maxlength="12" autocapitalize="characters" placeholder="Leave blank to start your own planner"></div>
+      <p class="mut" style="margin:-4px 0 8px">Have a code from a household owner? Enter it to share their family book. No code? You get a private planner of your own.</p>
       <button class="btn wide">Create account</button>
     </form>
     <p class="authswitch"><button class="linkbtn" data-act="tosignin">Back to sign in</button></p>`;

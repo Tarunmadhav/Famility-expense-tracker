@@ -762,7 +762,6 @@ document.addEventListener('submit', async (event) => {
     const again = document.getElementById('su_password2').value;
     const code = document.getElementById('su_code').value.trim();
     if (password !== again) return toast('The two passwords do not match');
-    if (!code) return toast('Enter the invite code from the household owner');
     await guard(async () => {
       await api.signup(name, email, password, code);
       S.error = '';
