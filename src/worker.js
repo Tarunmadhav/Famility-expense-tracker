@@ -76,6 +76,27 @@ function sniffMime(head) {
 const COOKIE = 'ffp_session';
 const PIN_RE = /^\d{4,12}$/;
 
+/**
+ * Tables carried over when the household moves to another Cloudflare account.
+ * `sessions` is deliberately absent: session tokens are bound to this origin's cookie
+ * and cannot be reused elsewhere. `auth_fails` and `rate_limits` are transient abuse
+ * counters that must not lock the owner out of the new deployment.
+ * See migration/DATABASE_MIGRATION.md. This route is temporary: remove it after the move.
+ */
+const SNAPSHOT_TABLES = [
+  'meta',
+  'users',
+  'credentials',
+  'records',
+  'changes',
+  'notifications',
+  'push_subs',
+  'files',
+  'ai_connections',
+  'family_invites',
+];
+const SNAPSHOT_PAGE = 500;
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -670,6 +691,21 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true });
   }
 
+  /* ------------------------------------------------- migration snapshot */
+
+  // Owner-only, read-only dump of everything a migration must carry. Deployed only
+  // for the duration of the move; see migration/SECURITY_CHECKLIST.md.
+  if (path === '/api/admin/snapshot' && method === 'GET') {
+    if ((await memberRole(env, session.userId)) !== 'owner') {
+      throw new HttpError(403, 'Only the household owner can export a snapshot');
+    }
+    const snapshot = await exportSnapshot(env);
+    return json(snapshot, 200, {
+      'Content-Disposition': `attachment; filename="family-planner-snapshot-${snapshot.exportedAt.replace(/[:.]/g, '-')}.json"`,
+      'Cache-Control': 'no-store',
+    });
+  }
+
   if (path === '/api/admin/reset' && method === 'POST') {
     await wipeRecords(env, space);
     await seedDatabase(env, session.userId, space);
@@ -693,6 +729,61 @@ async function handleApi(request, env, ctx, url) {
   }
 
   throw new HttpError(404, 'Not found');
+}
+
+/**
+ * Read every migratable table into one object. Paginated with keyset cursors so a large
+ * ledger cannot exhaust Worker memory, and so concurrent writes during the export cannot
+ * make rows silently shift between pages the way OFFSET would. Read-only by construction.
+ */
+async function exportSnapshot(env) {
+  const all = async (sql, bind = []) => (await env.DB.prepare(sql).bind(...bind).all()).results || [];
+
+  const pageLoop = async (first, step, advance) => {
+    const rows = [];
+    let cursor = null;
+    for (let page = 0; page < 400; page += 1) {
+      const batch = cursor ? await all(step, cursor) : await all(first);
+      rows.push(...batch);
+      if (batch.length < SNAPSHOT_PAGE) break;
+      cursor = advance(batch[batch.length - 1]);
+    }
+    return rows;
+  };
+
+  const tables = {};
+  for (const name of SNAPSHOT_TABLES) tables[name] = [];
+
+  // Small tables: a single read is enough and keeps the code obvious.
+  tables.meta = await all('SELECT * FROM meta ORDER BY k');
+  tables.users = await all('SELECT * FROM users ORDER BY created_at, id');
+  tables.credentials = await all('SELECT * FROM credentials ORDER BY created_at, user_id');
+  tables.push_subs = await all('SELECT * FROM push_subs ORDER BY created_at, id');
+  tables.files = await all('SELECT * FROM files ORDER BY created_at, id');
+  tables.ai_connections = await all('SELECT * FROM ai_connections ORDER BY created_at, id');
+  tables.family_invites = await all('SELECT * FROM family_invites ORDER BY expires_at, code');
+
+  tables.records = await pageLoop(
+    `SELECT * FROM records ORDER BY space, collection, id LIMIT ${SNAPSHOT_PAGE}`,
+    `SELECT * FROM records WHERE (space, collection, id) > (?, ?, ?) ORDER BY space, collection, id LIMIT ${SNAPSHOT_PAGE}`,
+    (row) => [row.space, row.collection, row.id],
+  );
+  tables.changes = await pageLoop(
+    `SELECT * FROM changes ORDER BY seq LIMIT ${SNAPSHOT_PAGE}`,
+    `SELECT * FROM changes WHERE seq > ? ORDER BY seq LIMIT ${SNAPSHOT_PAGE}`,
+    (row) => [row.seq],
+  );
+  tables.notifications = await pageLoop(
+    `SELECT * FROM notifications ORDER BY created_at, id LIMIT ${SNAPSHOT_PAGE}`,
+    `SELECT * FROM notifications WHERE (created_at, id) > (?, ?) ORDER BY created_at, id LIMIT ${SNAPSHOT_PAGE}`,
+    (row) => [row.created_at, row.id],
+  );
+
+  const counts = {};
+  for (const name of SNAPSHOT_TABLES) counts[name] = tables[name].length;
+  const schemaRow = tables.meta.find((row) => row.k === 'schema');
+
+  return { exportedAt: new Date().toISOString(), schema: schemaRow ? schemaRow.v : null, counts, tables };
 }
 
 async function runBackground(env) {

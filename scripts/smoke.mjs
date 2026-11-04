@@ -307,6 +307,9 @@ ok('only the owner can invite', memberInvite.status === 403, `got ${memberInvite
 const members = await call('/api/family/members');
 ok('member list shows roles', members.status === 200 && members.data.members.some((m) => m.role === 'owner'));
 
+const memberSnapshot = await call('/api/admin/snapshot');
+ok('a member cannot export a migration snapshot', memberSnapshot.status === 403, `got ${memberSnapshot.status}`);
+
 const officeBlocked = await call('/api/records', {
   method: 'POST',
   headers: { 'X-Space': 'office' },
@@ -334,6 +337,58 @@ ok('lock revokes the session on the server', lockRes.status === 200);
 const afterLock = await call('/api/state');
 ok('a locked session cannot read data', afterLock.status === 401, `got ${afterLock.status}`);
 await call('/api/auth/login', { method: 'POST', body: { pin: process.env.FFP_PIN || '135790' } });
+
+// ------------------------------------------------------- migration snapshot
+// Temporary owner-only export route (migration/DATABASE_MIGRATION.md).
+const anonSnapshot = await fetch(`${BASE}/api/admin/snapshot`);
+ok('a snapshot needs a session', anonSnapshot.status === 401, `got ${anonSnapshot.status}`);
+
+const revBefore = (await call('/api/state?since=0')).data.rev;
+const snapRes = await call('/api/admin/snapshot');
+const snap = snapRes.data;
+ok('the owner can export a snapshot', snapRes.status === 200 && Boolean(snap.tables), String(snapRes.status));
+const SNAP_TABLES = [
+  'meta',
+  'users',
+  'credentials',
+  'records',
+  'changes',
+  'notifications',
+  'push_subs',
+  'files',
+  'ai_connections',
+  'family_invites',
+];
+ok(
+  'the snapshot carries every migratable table',
+  SNAP_TABLES.every((t) => Array.isArray(snap.tables[t])),
+  Object.keys(snap.tables).join(','),
+);
+ok(
+  'the snapshot omits sessions and abuse counters',
+  !('sessions' in snap.tables) && !('auth_fails' in snap.tables) && !('rate_limits' in snap.tables),
+  Object.keys(snap.tables).join(','),
+);
+ok(
+  'the snapshot counts match its own rows',
+  SNAP_TABLES.every((t) => snap.counts[t] === snap.tables[t].length),
+  JSON.stringify(snap.counts),
+);
+ok(
+  'the snapshot holds real accounts and ledger rows',
+  snap.counts.users >= 2 && snap.counts.records > 0 && snap.counts.credentials >= 1,
+  JSON.stringify(snap.counts),
+);
+ok(
+  'file rows keep the storage key the migration needs',
+  snap.tables.files.every((f) => typeof f.key === 'string' && f.key.length > 0),
+);
+ok(
+  'record documents stay JSON strings so encryption survives',
+  snap.tables.records.every((r) => typeof r.doc === 'string' && r.doc.trim().startsWith('{')),
+);
+const revAfter = (await call('/api/state?since=0')).data.rev;
+ok('exporting a snapshot writes nothing', revBefore === revAfter, `rev ${revBefore} -> ${revAfter}`);
 
 const hardHeaders = await fetch(`${BASE}/api/state`, { headers: { Cookie: cookie } });
 ok(
