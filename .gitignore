@@ -35,3 +35,6 @@ android/local.properties
 
 # migration artifacts: snapshots contain password hashes and the VAPID key
 migration/out/
+
+# earlier, superseded handoff notes (kept on disk, not in the repo)
+family-planner-migration-toolkit/
