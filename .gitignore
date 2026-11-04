@@ -23,3 +23,12 @@ android/.gradle/
 # local tooling and scan output
 tools/
 artifacts/
+
+# Android signing material — never commit these
+*.jks
+*.keystore
+keystore.properties
+local.properties
+signing/
+android/local.properties
+*.idsig

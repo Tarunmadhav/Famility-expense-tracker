@@ -25,7 +25,9 @@ import android.widget.Toast;
  */
 public class MainActivity extends Activity {
 
-    private static final String START_URL = "https://site-0f6d51dc534d4dd4af419f3a4cf5f0ad.freebuff.page/";
+    // Supplied by Gradle (android/gradle.properties -> plannerApiBaseUrl), so a
+    // debug build can point at a local Worker without touching this file.
+    private static final String START_URL = BuildConfig.PLANNER_URL;
     private static final String CHANNEL_ID = "planner_alerts";
     private static final int NOTIFICATION_PERMISSION = 7;
 
