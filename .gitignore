@@ -32,3 +32,6 @@ local.properties
 signing/
 android/local.properties
 *.idsig
+
+# migration artifacts: snapshots contain password hashes and the VAPID key
+migration/out/

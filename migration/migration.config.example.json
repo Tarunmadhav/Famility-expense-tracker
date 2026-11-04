@@ -1,0 +1,22 @@
+{
+  "//": "Copy to migration/migration.config.json. Values are NOT secrets: account ids, database ids and bucket names are public identifiers. Never put tokens, passwords or FIELD_KEY here.",
+  "source": {
+    "baseUrl": "https://site-0f6d51dc534d4dd4af419f3a4cf5f0ad.freebuff.page",
+    "snapshotPath": "/api/admin/snapshot"
+  },
+  "destination": {
+    "workerName": "family-finance-planner",
+    "baseUrl": "https://family-finance-planner.REPLACE-WITH-YOUR-SUBDOMAIN.workers.dev",
+    "d1DatabaseName": "family-planner",
+    "d1DatabaseId": "",
+    "r2BucketName": "family-planner-drive",
+    "configFile": "wrangler.production.jsonc"
+  },
+  "keyFile": ".secrets/field_key.txt",
+  "outputDir": "migration/out",
+  "safety": {
+    "requireCleanGit": true,
+    "confirmBeforeDeploy": true,
+    "maxFileBytes": 8388608
+  }
+}

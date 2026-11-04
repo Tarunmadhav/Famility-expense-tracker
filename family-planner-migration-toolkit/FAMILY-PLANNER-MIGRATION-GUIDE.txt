@@ -1,0 +1,114 @@
+FAMILY FINANCE PLANNER — MIGRATION GUIDE
+========================================
+
+Repository:
+https://github.com/Tarunmadhav/Famility-expense-tracker.git
+
+This toolkit is deliberately staged. It does NOT delete or change anything in Freebuff.
+Do not switch the live website or Android APK until the new environment has been tested.
+
+FILES
+-----
+family-planner-migrate.ps1
+  A PowerShell helper for local checks, npm install/build, Cloudflare resource
+  provisioning, optional SQL import, setting FIELD_KEY, and gated deployment.
+
+BEFORE YOU START
+----------------
+1. Keep Freebuff running.
+2. Clone the repository from GitHub.
+3. Install Node.js 22 LTS and Git.
+4. Create/log into your own Cloudflare account.
+5. Keep the original FIELD_KEY safely. Never paste it into chat, GitHub, or a
+   normal text file. It must be the same key used to encrypt the source data.
+6. Obtain a FULL production D1 export and a separate export of all R2 objects
+   from Freebuff. The app's in-app JSON export is NOT a full database migration:
+   it does not include every account, credentials, sessions, database metadata,
+   file metadata, and all books.
+
+RUN FROM POWERSHELL
+-------------------
+Open PowerShell in the cloned repository folder (the folder containing
+package.json and wrangler.jsonc).
+
+If Windows blocks the script for this terminal session, run:
+  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+Then run:
+  .\family-planner-migrate.ps1 -Stage Check
+
+Install dependencies and build:
+  .\family-planner-migrate.ps1 -Stage Prepare
+
+Log into Cloudflare and create/configure destination D1 and R2:
+  .\family-planner-migrate.ps1 -Stage Provision
+
+The Provision stage creates a destination D1 database and R2 bucket and updates
+wrangler.jsonc after making a timestamped backup. It does not deploy.
+
+DATABASE IMPORT
+---------------
+Only after Freebuff provides a complete SQLite/D1 SQL export:
+  .\family-planner-migrate.ps1 -Stage ImportDatabase -SqlFile ".\backups\freebuff-export.sql"
+
+Do not use this with an in-app JSON export. The script asks for confirmation
+before importing into the REMOTE destination database.
+
+FIELD KEY
+---------
+After confirming you have the ORIGINAL production FIELD_KEY:
+  .\family-planner-migrate.ps1 -Stage SetFieldKey
+
+The script prompts for the key with hidden input and sends it to Wrangler as a
+Worker secret. Do not generate a replacement key for already encrypted data.
+
+R2 FILES
+--------
+The script does not yet transfer R2 objects. The correct method depends on
+Freebuff's export capabilities. We need one of:
+- downloadable archive of the source bucket, or
+- S3-compatible endpoint + access key + secret key, or
+- a platform-supported bulk export.
+
+The database `files` table contains object keys; those objects must be copied
+with their keys preserved. Do not deploy a production cutover until file
+objects and metadata have both been verified.
+
+DEPLOY
+------
+Only after the complete D1 import, FIELD_KEY setup, R2 transfer, and validation:
+  .\family-planner-migrate.ps1 -Stage Deploy
+
+The script asks for explicit confirmation before deploying.
+
+AFTER DEPLOY
+------------
+Check:
+  https://YOUR-WORKER-URL/api/health
+
+The response should report ok=true, database=true, assets=true.
+
+ANDROID
+-------
+The repository's Android build uses a Gradle property named
+plannerApiBaseUrl. The Android Gradle properties currently point at the old
+Freebuff URL. After the new Worker URL is known, update the production URL
+there or pass it to Gradle with:
+  .\gradlew assembleDebug -PplannerApiBaseUrl=https://YOUR-WORKER-URL/
+
+IMPORTANT ANDROID HOST CHECK
+----------------------------
+MainActivity currently treats freebuff.page as an internal WebView host.
+When moving to workers.dev or a custom domain, update the allowed internal
+host check to include your new exact hostname. Otherwise the WebView may open
+the new planner outside the app. Do this only after the new hostname is known.
+
+IMPORTANT SECURITY NOTES
+------------------------
+- The repository README currently displays a default family PIN. If that PIN
+  was ever active on a real deployment, change it immediately.
+- Never send API tokens, Cloudflare API keys, FIELD_KEY, passwords, or private
+  storage credentials in chat.
+- The migration script never deletes the old Freebuff database or files.
+- Do not disable Freebuff until users, records, encrypted fields, attachments,
+  login, live sync, notifications, and Android have all passed tests.
