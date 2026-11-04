@@ -7,7 +7,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-apk-${{ github.ref }}
@@ -276,3 +276,44 @@ jobs:
           files: dist/*.apk
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  release-push:
+    name: release-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.signing-ready.outputs.ready == 'true'
+    needs: [signing-ready, build-apk, build-debug, upload]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download signed APK
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: family-planner-apk
+          path: dist
+        continue-on-error: true
+
+      - name: Download debug APK
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: family-planner-apk-debug
+          path: dist
+        continue-on-error: true
+
+      - name: Create release with both APKs
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: Family Planner APK build ${{ github.run_number }}
+          body: |
+            Automated build from ${{ github.sha }}
+            - Signed release APK (if available)
+            - Debug APK
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.apk
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
