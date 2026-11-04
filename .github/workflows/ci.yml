@@ -46,12 +46,34 @@ jobs:
 
           FFP_PIN=135790 node scripts/smoke.mjs
 
+      # Runs on its own database: the suite creates accounts and refuses to touch a
+      # configured instance, so it must not share the smoke-test D1 file.
+      - name: Authorisation + isolation suite
+        run: |
+          set -euo pipefail
+          npx wrangler dev --port 8799 --local --log-level warn --persist-to .wrangler/ci-authz > wrangler-authz.log 2>&1 &
+          APID=$!
+          trap 'kill "$APID" 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8799/api/health > /dev/null; then
+              echo "worker ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8799/api/health > /dev/null || { echo "worker did not start"; cat wrangler-authz.log; exit 1; }
+
+          BASE_URL=http://127.0.0.1:8799 npm run security-test
+
       - name: Upload worker log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: wrangler-log
-          path: wrangler.log
+          path: |
+            wrangler.log
+            wrangler-authz.log
 
   # Deployment stays manual against the owner's Cloudflare account:
   #   npm run build && npx wrangler deploy
