@@ -120,8 +120,10 @@ jobs:
       # cmdline-tools, so use sdkmanager directly.
       - name: Install SDK platform and build-tools
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+          SDKM="$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          test -x "$SDKM" || { echo "sdkmanager not found under $ANDROID_HOME/cmdline-tools"; ls "$ANDROID_HOME"; exit 1; }
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" --install "platforms;android-36" "build-tools;36.0.0"
 
       - name: Decode signing keystore into runner temp
         env:
@@ -191,8 +193,10 @@ jobs:
 
       - name: Install SDK platform and build-tools
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+          SDKM="$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          test -x "$SDKM" || { echo "sdkmanager not found under $ANDROID_HOME/cmdline-tools"; ls "$ANDROID_HOME"; exit 1; }
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" --install "platforms;android-36" "build-tools;36.0.0"
 
       # Installable test build. Signed with the throwaway debug key, so it can be
       # sideloaded but never published; the signed release comes from build-apk.
