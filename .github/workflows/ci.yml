@@ -31,7 +31,9 @@ jobs:
       - name: Worker + end-to-end API suite
         run: |
           set -euo pipefail
-          npx wrangler dev --port 8787 --local --log-level warn > wrangler.log 2>&1 &
+          # MIGRATION_MODE only exists for this job: the smoke suite validates the
+          # snapshot format, which is a 404 unless a migration is switched on.
+          npx wrangler dev --port 8787 --local --log-level warn --var MIGRATION_MODE:1 > wrangler.log 2>&1 &
           WPID=$!
           trap 'kill "$WPID" 2>/dev/null || true' EXIT
 
