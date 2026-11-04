@@ -96,10 +96,14 @@ Then edit destination.workerName and destination.baseUrl.
 "@
     }
     $json = Get-Content -Raw $Config | ConvertFrom-Json
-    if (-not $json.destination.baseUrl -or $json.destination.baseUrl -match 'REPLACE-WITH') {
+    return $json
+}
+
+function Assert-DestinationBase {
+    param($ConfigObject)
+    if (-not $ConfigObject.destination.baseUrl -or $ConfigObject.destination.baseUrl -match 'REPLACE-WITH') {
         Stop-WithHelp "destination.baseUrl is not set in $Config" "Set it to https://<worker>.<subdomain>.workers.dev once the Worker is deployed, or use the URL printed by the Deploy step."
     }
-    return $json
 }
 
 function Save-Config {
@@ -331,6 +335,7 @@ if ($Step -eq 'Import') {
     if (-not (Test-Path $sqlDir)) { Stop-WithHelp "no SQL files in $sqlDir" "Run: .\migration\migrate.ps1 -Step Sql" }
 
     Write-Step "Import data into $($config.destination.d1DatabaseName)"
+    if (-not $config.destination.configFile) { Stop-WithHelp "destination.configFile is empty" "Set it to wrangler.production.jsonc." }
     Write-Note "Additive only: INSERT OR REPLACE. Nothing is deleted. Re-running is safe."
     $files = Get-ChildItem -Path $sqlDir -Filter 'import-*.sql' | Sort-Object Name
     if ($files.Count -eq 0) { Stop-WithHelp "no import-*.sql files in $sqlDir" "Run -Step Sql first." }
@@ -430,6 +435,7 @@ if ($Step -eq 'Deploy') {
 
 # ----------------------------------------------------------------- Health
 if ($Step -eq 'Health') {
+    Assert-DestinationBase -ConfigObject $config
     Write-Step "Check $($config.destination.baseUrl)"
     try {
         $health = Invoke-RestMethod -Uri "$($config.destination.baseUrl)/api/health" -TimeoutSec 30

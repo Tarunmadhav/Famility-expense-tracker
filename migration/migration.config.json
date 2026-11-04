@@ -1,0 +1,21 @@
+{
+  "source": {
+    "baseUrl": "https://site-0f6d51dc534d4dd4af419f3a4cf5f0ad.freebuff.page",
+    "snapshotPath": "/api/admin/snapshot"
+  },
+  "destination": {
+    "workerName": "family-finance-planner",
+    "baseUrl": "",
+    "d1DatabaseName": "family-planner",
+    "d1DatabaseId": "",
+    "r2BucketName": "family-planner-drive",
+    "configFile": "wrangler.production.jsonc"
+  },
+  "keyFile": ".secrets/field_key.txt",
+  "outputDir": "migration/out",
+  "safety": {
+    "requireCleanGit": true,
+    "confirmBeforeDeploy": true,
+    "maxFileBytes": 8388608
+  }
+}
