@@ -48,7 +48,7 @@ APKSIGNER="$(tool apksigner)"
   -o "$OUT/app-unsigned.apk" \
   -I "$AJAR" \
   --manifest "$MANIFEST" \
-  -R "$OUT/res.zip" \
+  --auto-add-overlay -R "$OUT/res.zip" \
   --java "$OUT/gen" \
   --min-sdk-version 26 \
   --target-sdk-version 35 \

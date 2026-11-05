@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The planner paints on a #0F172A canvas, so the window background matches it.
+      A light platform theme showed a white flash between the native splash and the
+      first WebView frame, and on every rotation.
+    -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/plannerBackground</item>
+        <item name="android:colorBackground">@color/plannerBackground</item>
+        <item name="android:statusBarColor">@color/plannerBackground</item>
+        <item name="android:navigationBarColor">@color/plannerBackground</item>
+    </style>
+</resources>

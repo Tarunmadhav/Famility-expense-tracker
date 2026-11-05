@@ -566,6 +566,22 @@ export function normaliseEmail(email) {
   return String(email || '').trim().toLowerCase().slice(0, 160);
 }
 
+/**
+ * Check a PIN against one account only. `verifyPin` answers "whose PIN is this?"
+ * for sign-in, which is the wrong question for an already-authenticated session:
+ * a member must not be able to authorise a password change with the owner's PIN.
+ */
+export async function verifyUserPin(env, userId, pin) {
+  const row = await env.DB.prepare(
+    `SELECT pin_hash, pin_salt, iterations FROM users WHERE id = ? AND length(pin_hash) > 0`,
+  )
+    .bind(String(userId))
+    .first();
+  if (!row) return false;
+  const candidate = await derivePin(String(pin || ''), row.pin_salt, row.iterations || PBKDF2_ITERATIONS);
+  return timingSafeEqual(candidate, row.pin_hash);
+}
+
 export async function emailTaken(env, email) {
   const row = await env.DB.prepare(`SELECT user_id FROM credentials WHERE email = ?`)
     .bind(normaliseEmail(email))

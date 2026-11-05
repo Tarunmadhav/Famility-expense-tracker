@@ -756,7 +756,12 @@ document.addEventListener('click', async (event) => {
     case 'save-name':
       await guard(async () => {
         const name = document.getElementById('ac_name').value.trim();
+        if (!name) return toast('Enter a name');
         const out = await api.renameAccount(name);
+        S.me.name = out.name;
+        // The member table and the "named" rows elsewhere read from the loaded
+        // profile, so refresh it instead of leaving the old name on screen.
+        await loadSettingsData();
         S.me.name = out.name;
         render();
         toast('Name updated');
@@ -773,7 +778,10 @@ document.addEventListener('click', async (event) => {
       await guard(async () => {
         const code = document.getElementById('ac_totp').value.trim();
         const out = await api.enableTwoFactor(code);
-        S.security = { twoFactor: true, hasRecovery: true, setup: null };
+        // Merge, then reload: assigning a fresh object dropped email/role/encryption
+        // until the next visit to Settings.
+        S.security = { ...(S.security || {}), twoFactor: true, hasRecovery: true, setup: null };
+        await loadSettingsData();
         render();
         showRecoveryCode(out && out.recoveryCode, 'Two-factor is on. Save this recovery code.');
       });
