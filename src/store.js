@@ -9,7 +9,7 @@ import { HttpError } from './errors.js';
 import { ensureProfiles, spaceForProfile } from './profiles.js';
 import { matchTotp, newRecoveryCode, normaliseRecoveryCode, otpauthUri, randomBase32 } from './twofactor.js';
 
-export const SCHEMA_VERSION = '10';
+export const SCHEMA_VERSION = '11';
 // 100 000 is the maximum iteration count the production Workers runtime supports
 // for PBKDF2-SHA256; attempts are additionally rate limited (8 per 15 minutes per IP).
 const PBKDF2_ITERATIONS = 100000;
@@ -33,6 +33,8 @@ const STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS auth_fails_idx ON auth_fails (ip, ts)`,
   `CREATE TABLE IF NOT EXISTS credentials (user_id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, password_salt TEXT, iterations INTEGER, created_at INTEGER)`,
   `CREATE TABLE IF NOT EXISTS cloud_links (user_id TEXT NOT NULL, provider TEXT NOT NULL, refresh_token TEXT, access_token TEXT, expires_at INTEGER, created_at INTEGER, PRIMARY KEY (user_id, provider))`,
+  `CREATE TABLE IF NOT EXISTS email_otps (email TEXT PRIMARY KEY, code_hash TEXT NOT NULL, salt TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS oauth_links (provider TEXT NOT NULL, provider_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (provider, provider_id))`,
   `CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, space TEXT NOT NULL DEFAULT 'family', name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, key TEXT UNIQUE NOT NULL, collection TEXT, record_id TEXT, uploaded_by TEXT, created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS files_created_idx ON files (space, created_at DESC)`,
   `CREATE TABLE IF NOT EXISTS ai_connections (id TEXT PRIMARY KEY, provider TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL, api_key TEXT NOT NULL, created_by TEXT, created_at INTEGER NOT NULL, profile_id TEXT)`,
@@ -372,6 +374,91 @@ export async function recoverWithCode(env, code, newPin) {
   await setUserPin(env, found.id, newPin);
   await deleteUserSessions(env, found.id);
   return found.id;
+}
+
+/* --------------------------------------------------------- email OTP reset */
+
+const OTP_MINUTES = 10;
+const OTP_ATTEMPTS = 5;
+
+/**
+ * A six-digit code, stored only as a PBKDF2 hash with a ten-minute lifetime and a
+ * hard attempt ceiling. Requesting a new code replaces the old one, so an old
+ * message cannot be replayed.
+ */
+export async function createEmailOtp(env, email) {
+  const clean = normaliseEmail(email);
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
+  const hash = await derivePin(code, salt, PBKDF2_ITERATIONS);
+  await env.DB.prepare(
+    `INSERT INTO email_otps (email, code_hash, salt, expires_at, attempts, created_at) VALUES (?, ?, ?, ?, 0, ?)
+     ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, salt = excluded.salt,
+       expires_at = excluded.expires_at, attempts = 0, created_at = excluded.created_at`,
+  )
+    .bind(clean, hash, salt, Date.now() + OTP_MINUTES * 60_000, Date.now())
+    .run();
+  return { code, minutes: OTP_MINUTES };
+}
+
+/** True when the code matched; the row is consumed on success either way. */
+export async function consumeEmailOtp(env, email, code) {
+  const clean = normaliseEmail(email);
+  const row = await env.DB.prepare(`SELECT * FROM email_otps WHERE email = ?`).bind(clean).first();
+  if (!row) return false;
+  if (row.expires_at < Date.now() || (row.attempts || 0) >= OTP_ATTEMPTS) {
+    await env.DB.prepare(`DELETE FROM email_otps WHERE email = ?`).bind(clean).run();
+    return false;
+  }
+  const candidate = await derivePin(String(code || '').trim(), row.salt, PBKDF2_ITERATIONS);
+  if (!timingSafeEqual(candidate, row.code_hash)) {
+    await env.DB.prepare(`UPDATE email_otps SET attempts = attempts + 1 WHERE email = ?`).bind(clean).run();
+    return false;
+  }
+  await env.DB.prepare(`DELETE FROM email_otps WHERE email = ?`).bind(clean).run();
+  return true;
+}
+
+/* ------------------------------------------------------------- social login */
+
+/**
+ * Sign in with a provider identity. An existing email keeps its account; a new
+ * email creates one with no password (the provider owns that credential).
+ */
+export async function findOrCreateOauthUser(env, { provider, providerId, email, name }) {
+  const clean = normaliseEmail(email);
+  const linked = await env.DB.prepare(
+    `SELECT user_id FROM oauth_links WHERE provider = ? AND provider_id = ?`,
+  )
+    .bind(provider, String(providerId))
+    .first();
+  let userId = linked ? linked.user_id : '';
+  if (!userId) {
+    const existing = await env.DB.prepare(`SELECT user_id FROM credentials WHERE email = ?`).bind(clean).first();
+    if (existing) {
+      userId = existing.user_id;
+    } else {
+      userId = crypto.randomUUID();
+      const home = `h:${userId}`;
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at, role, household) VALUES (?, ?, '', '', ?, ?, 'owner', ?)`,
+        ).bind(userId, String(name || clean.split('@')[0]).slice(0, 60), PBKDF2_ITERATIONS, Date.now(), home),
+        env.DB.prepare(
+          `INSERT INTO credentials (user_id, email, password_hash, password_salt, iterations, created_at) VALUES (?, ?, '', '', ?, ?)`,
+        ).bind(userId, clean, PBKDF2_ITERATIONS, Date.now()),
+      ]);
+      await ensureProfiles(env);
+    }
+    await env.DB.prepare(
+      `INSERT INTO oauth_links (provider, provider_id, user_id, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(provider, provider_id) DO UPDATE SET user_id = excluded.user_id`,
+    )
+      .bind(provider, String(providerId), userId, Date.now())
+      .run();
+  }
+  const row = await env.DB.prepare(`SELECT id, name FROM users WHERE id = ?`).bind(userId).first();
+  return row ? { id: row.id, name: row.name, email: clean } : null;
 }
 
 /* ------------------------------------------------------------------- 2fa */

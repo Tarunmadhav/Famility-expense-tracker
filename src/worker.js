@@ -61,9 +61,13 @@ import {
   wipeRecords,
   accountHasTotp,
   beginTotp,
+  consumeEmailOtp,
+  createEmailOtp,
   createRecoveryCode,
   disableTotp,
+  findOrCreateOauthUser,
   getUser,
+  randomToken,
   enableTotp,
   recoverWithCode,
   totpState,
@@ -73,6 +77,8 @@ import { removeSubscription, saveSubscription, sendTestPush } from './push.js';
 import { scanReceipt, testConnection } from './ai.js';
 import { encryptionReady } from './fieldcrypto.js';
 import { providerInfo, startConnect, finishConnect, uploadBackup } from './cloud.js';
+import { emailConfigured, sendOtpEmail } from './email.js';
+import { authorizeUrl, exchangeCode, fetchProfile, signInProviders } from './oauth.js';
 import { ICONS } from './icons.js';
 import {
   ROLE_LABEL,
@@ -86,8 +92,8 @@ import {
 } from './profiles.js';
 
 /** Build/api version reported to clients; bump when the API contract changes. */
-const APP_VERSION = '2.2.0';
-const API_VERSION = 10;
+const APP_VERSION = '2.3.0';
+const API_VERSION = 11;
 
 /** Content sniffing: the browser-declared type is never trusted. */
 function sniffMime(head) {
@@ -431,13 +437,101 @@ async function handleApi(request, env, ctx, url) {
       configured,
       user: session ? { name: session.name } : null,
       push: Boolean((await getMeta(env, 'vapid', null))?.publicKey),
-      signupOpen: configured,
+      signupOpen: true,
+      email: emailConfigured(env),
+      providers: signInProviders(env),
     });
+  }
+
+  if (path === '/api/auth/otp/request' && method === 'POST') {
+    if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    const ip = clientIp(request);
+    if (await isLockedOut(env, ip)) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
+    if (await hitRateLimit(env, `otp:${ip}`, 6, 3600_000)) {
+      throw new HttpError(429, 'Too many codes requested. Try again in an hour.');
+    }
+    const body = await readJson(request);
+    const email = normaliseEmail(body.email);
+    if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email address');
+    const known = await env.DB.prepare(`SELECT user_id FROM credentials WHERE email = ?`).bind(email).first();
+    // The reply is the same either way, so the form cannot be used to discover
+    // which addresses have accounts.
+    if (known) {
+      const { code, minutes } = await createEmailOtp(env, email);
+      await sendOtpEmail(env, { to: email, code, minutes });
+      await audit(env, { action: 'auth.otp', actor: known.user_id });
+    }
+    return json({ ok: true, emailed: true });
+  }
+
+  if (path === '/api/auth/otp/reset' && method === 'POST') {
+    if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    const ip = clientIp(request);
+    if (await isLockedOut(env, ip)) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
+    const body = await readJson(request);
+    const email = normaliseEmail(body.email);
+    if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email address');
+    if (!isStrongPassword(body.password)) throw new HttpError(400, 'Password needs at least 8 characters with a letter and a number');
+    const code = String(body.code || '').replace(/\D/g, '');
+    if (code.length !== 6) throw new HttpError(400, 'Enter the six-digit code');
+    const ok = await consumeEmailOtp(env, email, code);
+    if (!ok) {
+      await recordAuthFailure(env, ip);
+      throw new HttpError(401, 'That code is wrong or has expired');
+    }
+    const row = await env.DB.prepare(`SELECT user_id FROM credentials WHERE email = ?`).bind(email).first();
+    if (!row) throw new HttpError(401, 'That code is wrong or has expired');
+    await setPassword(env, row.user_id, email, String(body.password));
+    await deleteUserSessions(env, row.user_id);
+    await clearAuthFailures(env, ip);
+    await audit(env, { action: 'auth.password', actor: row.user_id, detail: 'otp' });
+    return json({ ok: true });
+  }
+
+  const oauthCallback = path.match(/^\/api\/auth\/oauth\/callback\/([a-z]{1,20})$/);
+  if (path === '/api/auth/oauth/start' && method === 'POST') {
+    if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    const body = await readJson(request);
+    const provider = String(body.provider || '');
+    const state = randomToken(24);
+    await setMeta(env, `signin:${state}`, { provider, at: Date.now() });
+    const redirectUri = `${url.origin}/api/auth/oauth/callback/${provider}`;
+    return json({ ok: true, url: authorizeUrl(env, provider, { redirectUri, state }) });
+  }
+
+  if (oauthCallback && method === 'GET') {
+    const provider = oauthCallback[1];
+    const state = String(url.searchParams.get('state') || '');
+    const pending = await getMeta(env, `signin:${state}`, null);
+    const back = new URL('/', url.origin);
+    if (!pending || pending.provider !== provider || Date.now() - pending.at > 600_000) {
+      back.searchParams.set('signin', 'expired');
+      return Response.redirect(back.toString(), 302);
+    }
+    await setMeta(env, `signin:${state}`, null);
+    try {
+      const token = await exchangeCode(env, provider, {
+        code: url.searchParams.get('code'),
+        redirectUri: `${url.origin}/api/auth/oauth/callback/${provider}`,
+      });
+      const profile = await fetchProfile(env, provider, token);
+      const user = await findOrCreateOauthUser(env, profile);
+      if (!user) throw new HttpError(401, 'Could not create the account');
+      const session = await createSession(env, user.id, request);
+      await audit(env, { action: 'auth.login', actor: user.id, detail: provider });
+      return new Response(null, {
+        status: 302,
+        headers: { Location: back.toString(), 'Set-Cookie': sessionCookie(session, url) },
+      });
+    } catch (err) {
+      console.error('oauth sign-in failed', provider, err && err.message);
+      back.searchParams.set('signin', 'failed');
+      return Response.redirect(back.toString(), 302);
+    }
   }
 
   if (path === '/api/auth/signup' && method === 'POST') {
     if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
-    if ((await countUsers(env)) === 0) throw new HttpError(403, 'Set up the planner first');
     const ip = clientIp(request);
     if (await isLockedOut(env, ip)) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
     const body = await readJson(request);

@@ -474,39 +474,66 @@ export function lockHtml(message = '') {
     </form></div></div>`;
 }
 
+function socialButtonsHtml() {
+  const providers = (S.authProviders || []).filter((p) => p.configured);
+  if (!providers.length) return '';
+  return `<div class="divider"><span>or continue with</span></div>
+    <div class="tools" style="justify-content:center;flex-wrap:wrap">
+      ${providers
+        .map((p) => `<button type="button" class="btn g" data-act="oauth" data-id="${esc(p.id)}">${esc(p.label)}</button>`)
+        .join('')}
+    </div>`;
+}
+
 export function loginFormHtml(message = '') {
+  const pinMode = S.authMethod === 'pin';
   return `${message ? `<div class="alerts">${esc(message)}</div>` : ''}
-    <form id="loginfrm">
-      <div class="fld"><label for="email">Email</label><input id="email" type="email" autocomplete="username" placeholder="you@example.com"></div>
-      <div class="fld"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" placeholder="••••••••"></div>
-      <div style="text-align:right;margin-top:-6px;margin-bottom:8px"><button type="button" class="linkbtn" data-act="forgot">Forgot password?</button></div>
-      <button class="btn wide">Sign in</button>
-    </form>
-    <div class="divider"><span>or unlock with the family PIN</span></div>
-    <form id="pinfrm"><div class="fld"><label for="pin">Family PIN</label><input id="pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="12" placeholder="••••"></div>
-      <button class="btn g wide">Unlock with PIN</button></form>
-    <p class="authswitch"><button class="linkbtn" data-act="signup">Create new account</button> · <button class="linkbtn" data-act="signup">Sign up</button></p>`;
+    <div class="seg authseg">
+      <button type="button" class="${pinMode ? '' : 'on'}" data-act="auth-method" data-id="email">Email &amp; password</button>
+      <button type="button" class="${pinMode ? 'on' : ''}" data-act="auth-method" data-id="pin">Family PIN</button>
+    </div>
+    ${pinMode
+      ? `<form id="pinfrm">
+          <div class="fld"><label for="pin">Family PIN</label><input id="pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="12" placeholder="••••" autofocus></div>
+          <button class="btn wide" style="background:var(--accent);color:var(--accent-ink)">Unlock</button>
+        </form>`
+      : `<form id="loginfrm">
+          <div class="fld"><label for="email">Email</label><input id="email" type="email" autocomplete="username" placeholder="you@example.com" autofocus></div>
+          <div class="fld"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+          <button class="btn wide" style="background:var(--accent);color:var(--accent-ink)">Sign in</button>
+        </form>`}
+    <p class="authswitch"><button class="linkbtn" data-act="forgot">Forgot password or PIN?</button></p>
+    ${socialButtonsHtml()}
+    <p class="authswitch">New here? <button class="linkbtn" data-act="signup">Create an account</button></p>
+    ${S.configured === false ? '<p class="authswitch mut">Or <button class="linkbtn" data-act="setup">set up a household PIN</button> for the whole family.</p>' : ''}`;
 }
 
 export function forgotFormHtml(message = '') {
+  if (!S.authEmailSent) {
+    return `${message ? `<div class="alerts">${esc(message)}</div>` : ''}
+      <p class="mut" style="margin-top:0">Enter the email on your account and we will send a six-digit code.</p>
+      <form id="otpfrm">
+        <div class="fld"><label for="fp_email">Email</label><input id="fp_email" type="email" autocomplete="username" placeholder="you@example.com" autofocus required></div>
+        <button class="btn wide" style="background:var(--accent);color:var(--accent-ink)">Send code</button>
+      </form>
+      <details class="authmore"><summary>I have a recovery code</summary>
+        <form id="recoverfrm" style="margin-top:8px">
+          <div class="fld"><label for="fp_code">Recovery code</label><input id="fp_code" autocomplete="off" autocapitalize="characters" placeholder="XXXX-XXXX-XXXX-XXXX"></div>
+          <div class="fld"><label for="fp_pin">New PIN</label><input id="fp_pin" type="password" inputmode="numeric" autocomplete="new-password" maxlength="12" placeholder="4-12 digits"></div>
+          <button class="btn g wide">Reset PIN</button>
+        </form>
+      </details>
+      <p class="authswitch"><button class="linkbtn" data-act="tosignin">Back to sign in</button></p>`;
+  }
   return `${message ? `<div class="alerts">${esc(message)}</div>` : ''}
-    <form id="forgotfrm">
-      <p class="mut" style="margin-top:0">Forgot your PIN? Enter the recovery code you saved when the account was
-        created. It is single-use and gives you a new PIN.</p>
-      <div class="fld"><label for="fp_code">Recovery code</label><input id="fp_code" autocomplete="off" autocapitalize="characters" placeholder="XXXX-XXXX-XXXX-XXXX" required></div>
-      <div class="fld"><label for="fp_pin">New PIN (4-12 digits)</label><input id="fp_pin" type="password" inputmode="numeric" autocomplete="new-password" maxlength="12" required></div>
-      <div class="fld"><label for="fp_pin2">Repeat new PIN</label><input id="fp_pin2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="12" required></div>
-      <button class="btn wide">Reset PIN</button>
+    <p class="mut" style="margin-top:0">If <b>${esc(S.authEmail || 'that address')}</b> has an account, a code is on its way.
+      It expires in 10 minutes.</p>
+    <form id="otpresetfrm">
+      <div class="fld"><label for="fp_otp">Six-digit code</label><input id="fp_otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" autofocus required></div>
+      <div class="fld"><label for="fp_newpass">New password</label><input id="fp_newpass" type="password" autocomplete="new-password" placeholder="8+ characters, letters and numbers" required></div>
+      <button class="btn wide" style="background:var(--accent);color:var(--accent-ink)">Reset password</button>
     </form>
-    <div class="divider"><span>or reset a password with the family PIN</span></div>
-    <form id="pwresetfrm">
-      <div class="fld"><label for="fp_email">Email</label><input id="fp_email" type="email" autocomplete="username" placeholder="you@example.com" required></div>
-      <div class="fld"><label for="fp_ownerpin">Family PIN</label><input id="fp_ownerpin" type="password" inputmode="numeric" autocomplete="off" maxlength="12" required></div>
-      <div class="fld"><label for="fp_newpass">New password</label><input id="fp_newpass" type="password" autocomplete="new-password" placeholder="At least 8 characters, letters and numbers" required></div>
-      <div class="fld"><label for="fp_newpass2">Repeat new password</label><input id="fp_newpass2" type="password" autocomplete="new-password" required></div>
-      <button class="btn g wide">Reset password</button>
-    </form>
-    <p class="authswitch"><button class="linkbtn" data-act="tosignin">Back to sign in</button></p>`;
+    <p class="authswitch"><button class="linkbtn" data-act="forgot">Use a different email</button></p>`;
 }
 
 /** Second factor step shown after a correct password or PIN. */
@@ -524,14 +551,16 @@ export function twoFactorFormHtml(message = '') {
 export function signupFormHtml(message = '') {
   return `${message ? `<div class="alerts">${esc(message)}</div>` : ''}
     <form id="signupfrm">
-      <div class="fld"><label for="su_name">Your name</label><input id="su_name" maxlength="60" placeholder="Name"></div>
+      <div class="fld"><label for="su_name">Name (optional)</label><input id="su_name" maxlength="60" placeholder="Your name"></div>
       <div class="fld"><label for="su_email">Email</label><input id="su_email" type="email" autocomplete="username" placeholder="you@example.com" required></div>
-      <div class="fld"><label for="su_password">Password</label><input id="su_password" type="password" autocomplete="new-password" placeholder="At least 8 characters, letters and numbers" required></div>
-      <div class="fld"><label for="su_password2">Repeat password</label><input id="su_password2" type="password" autocomplete="new-password" required></div>
-      <div class="fld"><label for="su_code">Invite code (optional)</label><input id="su_code" maxlength="12" autocapitalize="characters" placeholder="Leave blank to start your own planner"></div>
-      <p class="mut" style="margin:-4px 0 8px">Have a code from a household owner? Enter it to share their family book. No code? You get a private planner of your own.</p>
-      <button class="btn wide">Create account</button>
+      <div class="fld"><label for="su_password">Password</label><input id="su_password" type="password" autocomplete="new-password" placeholder="8+ characters, letters and numbers" required></div>
+      <button class="btn wide" style="background:var(--accent);color:var(--accent-ink)">Create account</button>
     </form>
+    <details class="authmore"><summary>I have an invite code</summary>
+      <div class="fld" style="margin-top:8px"><label for="su_code">Invite code</label><input id="su_code" maxlength="12" autocapitalize="characters" placeholder="ABCD1234"></div>
+      <p class="mut" style="margin:0">Joining someone's household shares their family book with you.</p>
+    </details>
+    ${socialButtonsHtml()}
     <p class="authswitch"><button class="linkbtn" data-act="tosignin">Back to sign in</button></p>`;
 }
 
@@ -540,8 +569,9 @@ export function setupFormHtml(message = '') {
     <form id="setupfrm"><div class="fld"><label for="household">Household name</label><input id="household" value="Family Planner" maxlength="60"></div>
     <div class="fld"><label for="pin">Choose a family PIN (4-12 digits)</label><input id="pin" type="password" inputmode="numeric" autocomplete="new-password" maxlength="12" required></div>
     <div class="fld"><label for="pin2">Repeat PIN</label><input id="pin2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="12" required></div>
-    <button class="btn wide">Create planner</button></form>
-    <p class="mut">This PIN protects every device that signs in. The starter data set is loaded once, then you can edit or import your own contacts.</p>`;
+    <button class="btn wide" style="background:var(--accent);color:var(--accent-ink)">Create planner</button></form>
+    <p class="mut">This PIN protects every device that signs in. The starter data set is loaded once, then you can edit or import your own contacts.</p>
+    <p class="authswitch"><button class="linkbtn" data-act="tosignin">Use email and password instead</button></p>`;
 }
 
 /* --------------------------------------------------------- notifications */

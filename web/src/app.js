@@ -35,7 +35,10 @@ S.account = {};
 S.members = [];
 S.invite = null;
 S.authView = 'login';
-S.authMode = 'login';
+S.authMethod = 'email';
+S.authEmailSent = false;
+S.authEmail = '';
+S.authProviders = [];
 let events = null;
 let pollTimer = null;
 let deferredPrompt = null;
@@ -219,12 +222,26 @@ function renderSyncBadge() {
 
 async function boot() {
   registerServiceWorker();
+  // The OAuth callbacks land on / with a short status flag instead of a message.
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const signin = params.get('signin');
+    if (signin === 'failed') toast('That sign-in did not complete. Try again or use a password.');
+    if (signin === 'expired') toast('That sign-in link expired. Start again.');
+    if (signin) window.history.replaceState({}, '', window.location.pathname);
+  } catch {
+    /* no history support */
+  }
   try {
     const status = await api.authStatus();
-    if (!status.configured) return setView('setup');
+    // A brand-new deployment no longer forces the PIN setup screen: signing up
+    // with an email is a normal first step, and the setup card is offered as a
+    // link from the same page.
+    S.configured = Boolean(status.configured);
     if (!status.user) return setView('login');
     S.me = status.user;
     S.pushPublicKey = status.push ? S.pushPublicKey : null;
+    S.authProviders = status.providers || [];
     await checkForUpdate();
     await loadApp();
     await applyDeepLinkProfile();
@@ -714,8 +731,21 @@ document.addEventListener('click', async (event) => {
       return render();
     case 'forgot':
       S.authView = 'forgot';
+      S.authEmailSent = false;
       S.error = '';
       return render();
+    case 'auth-method':
+      S.authMethod = id === 'pin' ? 'pin' : 'email';
+      S.error = '';
+      return render();
+    case 'oauth':
+      await guard(async () => {
+        const out = await api.oauthStart(id);
+        if (out && out.url) window.location.href = out.url;
+      });
+      return undefined;
+    case 'setup':
+      return setView('setup');
     case 'tosignin':
     case 'back-to-login':
       S.authView = 'login';
@@ -982,35 +1012,43 @@ document.addEventListener('change', async (event) => {
         S.error = '';
         await loadApp();
       }, 'Incorrect PIN');
-    } else if (form.id === 'forgotfrm') {
+    } else if (form.id === 'otpfrm') {
+      event.preventDefault();
+      const email = document.getElementById('fp_email').value.trim();
+      if (!email) return toast('Enter your email');
+      await guard(async () => {
+        await api.requestOtp(email);
+        S.authEmail = email;
+        S.authEmailSent = true;
+        S.error = '';
+        render();
+        toast('Check your email for the code');
+      });
+    } else if (form.id === 'otpresetfrm') {
+      event.preventDefault();
+      const code = document.getElementById('fp_otp').value.trim();
+      const password = document.getElementById('fp_newpass').value;
+      if (code.length !== 6) return toast('Enter the six-digit code');
+      await guard(async () => {
+        await api.resetWithOtp(S.authEmail, code, password);
+        S.error = '';
+        S.authEmailSent = false;
+        S.authView = 'login';
+        toast('Password reset. Sign in with the new password.');
+        render();
+      });
+    } else if (form.id === 'recoverfrm') {
       event.preventDefault();
       const code = document.getElementById('fp_code').value.trim();
       const pin = document.getElementById('fp_pin').value.trim();
-      const again = document.getElementById('fp_pin2').value.trim();
       if (!code) return toast('Enter your recovery code');
       if (!/^\d{4,12}$/.test(pin)) return toast('The new PIN must be 4-12 digits');
-      if (pin !== again) return toast('The two PINs do not match');
       await guard(async () => {
         const out = await api.recoverPin(code, pin);
         S.error = '';
         S.authView = 'login';
         render();
         showRecoveryCode(out && out.recoveryCode, 'PIN reset. Save your new recovery code.');
-      });
-    } else if (form.id === 'pwresetfrm') {
-      event.preventDefault();
-      const email = document.getElementById('fp_email').value.trim();
-      const pin = document.getElementById('fp_ownerpin').value.trim();
-      const password = document.getElementById('fp_newpass').value;
-      const again = document.getElementById('fp_newpass2').value;
-      if (!email || !pin) return toast('Enter your email and family PIN');
-      if (password !== again) return toast('The two passwords do not match');
-      await guard(async () => {
-        await api.resetPassword(email, pin, password);
-        S.error = '';
-        S.authView = 'login';
-        toast('Password reset. Sign in with your new password.');
-        render();
       });
     } else if (form.id === 'totploginfrm') {
       event.preventDefault();
@@ -1027,9 +1065,10 @@ document.addEventListener('change', async (event) => {
       const name = document.getElementById('su_name').value.trim();
       const email = document.getElementById('su_email').value.trim();
       const password = document.getElementById('su_password').value;
-      const again = document.getElementById('su_password2').value;
-      const code = document.getElementById('su_code').value.trim();
-      if (password !== again) return toast('The two passwords do not match');
+      const code = (document.getElementById('su_code') || {}).value || '';
+      if (!/^[A-Za-z0-9]{4,64}$/.test(password) && password.length < 8) {
+        return toast('Use at least 8 characters with a letter and a number');
+      }
       await guard(async () => {
         const out = await api.signup(name, email, password, code);
         S.error = '';

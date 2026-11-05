@@ -239,6 +239,13 @@ old rows it had written are moved with it once, on the first boot after the upgr
 send an invite from Settings and that account joins your household book as editor, viewer, admin or
 co-owner.
 
+### Sign-in options
+
+The sign-in card has one method switch (email + password, or the family PIN) and one link each for
+"forgot" and "create an account". Signing up is allowed on a completely empty deployment, so the
+first person does not have to use the PIN setup screen first; that screen is still offered as a link
+for households that prefer one shared PIN.
+
 ### Forgotten PIN or password
 
 There is no email sender in this deployment, so each account gets a **recovery code** at setup/signup
@@ -269,6 +276,39 @@ Register `<your-worker-url>/api/cloud/callback/google` (and `/onedrive`) as the 
 the API answers `501` with the missing variable name and Settings shows "Not configured", so nothing
 silently fails. Tokens are stored server-side in `cloud_links` and never sent to the browser; the app
 requests Drive's `drive.file` scope (only files it created) and OneDrive's `Files.ReadWrite.AppFolder`.
+
+### Email codes (password reset)
+
+`Forgot password` sends a six-digit code (ten minutes, five attempts, single use) through
+[Resend](https://resend.com):
+
+```bash
+npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put MAIL_FROM   # optional, e.g. 'Planner <codes@yourdomain>'
+```
+
+Without `RESEND_API_KEY` the endpoint answers `501` naming the variable and the form stays visible, so
+the failure is explicit. Verification is server-side (`createEmailOtp` / `consumeEmailOtp` in
+`src/store.js`): the code is stored only as a PBKDF2 hash, expires, is limited to five attempts, and a
+new request replaces the previous code. The request endpoint always answers `ok`, so it cannot be used
+to discover which addresses have accounts.
+
+### Social sign-in (Google, Microsoft, GitHub)
+
+Buttons appear only for providers whose credentials exist:
+
+```bash
+npx wrangler secret put GOOGLE_CLIENT_ID      # shared with the Drive connector
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+npx wrangler secret put ONEDRIVE_CLIENT_ID    # Microsoft sign-in
+npx wrangler secret put ONEDRIVE_CLIENT_SECRET
+npx wrangler secret put GITHUB_CLIENT_ID
+npx wrangler secret put GITHUB_CLIENT_SECRET
+```
+
+Redirect URI for each: `<worker-url>/api/auth/oauth/callback/<provider>`. An existing email keeps its
+account and its data; a new email creates an account in its own book. The OAuth state value is
+single-use and expires after ten minutes.
 
 ## Local development
 

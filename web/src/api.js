@@ -61,6 +61,9 @@ export const login = (payload) => request('/api/auth/login', { method: 'POST', b
 export const signup = (name, email, password, code) => request('/api/auth/signup', { method: 'POST', body: { name, email, password, code } });
 export const resetPassword = (email, pin, password) => request('/api/auth/reset', { method: 'POST', body: { email, pin, password } });
 export const recoverPin = (code, pin) => request('/api/auth/recover', { method: 'POST', body: { code, pin } });
+export const requestOtp = (email) => request('/api/auth/otp/request', { method: 'POST', body: { email } });
+export const resetWithOtp = (email, code, password) => request('/api/auth/otp/reset', { method: 'POST', body: { email, code, password } });
+export const oauthStart = (provider) => request('/api/auth/oauth/start', { method: 'POST', body: { provider } });
 export const renameAccount = (name) => request('/api/auth/account', { method: 'PATCH', body: { name } });
 export const twoFactorState = () => request('/api/auth/2fa');
 export const startTwoFactor = () => request('/api/auth/2fa/start', { method: 'POST' });
