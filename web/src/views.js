@@ -257,8 +257,11 @@ export function settingsView() {
         ? 'Notifications are blocked in the browser settings for this site.'
         : 'Notifications are not enabled yet.';
 
-  return `<div class="card"><h2>Your account</h2>
+  const security = S.security || {};
+  return `<div class="card"><h2>Your profile</h2>
       <div class="mrow"><span>Signed in as</span><b>${esc(S.me.name || '-')}</b></div>
+      <div class="fld" style="margin-top:10px"><label for="ac_name">Display name</label><input id="ac_name" maxlength="60" value="${esc(S.me.name || '')}"></div>
+      <button class="btn" data-act="save-name">Save name</button>
       <div class="mrow"><span>Email</span><b>${esc(S.account.email || 'Family PIN only')}</b></div>
       <div class="mrow"><span>Profile</span><b>${esc(S.profile ? `${S.profile.name} · ${S.profile.role}` : '-')}</b></div>
       <div class="mrow"><span>Your role here</span><b>${esc(S.profile ? S.profile.role : '-')}</b></div>
@@ -285,6 +288,38 @@ export function settingsView() {
       })
       .join('') || '<tr><td colspan="4" class="mut">Only you so far</td></tr>'}</tbody></table></div>
     ${S.profile && S.profile.role === 'owner' ? `<p style="margin-top:10px"><button class="btn" data-act="invite">Create invite code</button></p>${S.invite ? `<div class="alerts">Invite code <b>${esc(S.invite.code)}</b> — expires in 72 hours. This code is shown once, so copy it now.</div>` : ''}` : ''}
+  </div>
+
+  <div class="card"><h2>Two-factor &amp; recovery</h2>
+    <p class="mut" style="margin-top:0">Two-factor adds a six-digit code from an authenticator app on top of your
+      password or PIN. A recovery code resets a forgotten PIN without any device.</p>
+    <div class="mrow"><span>Two-factor</span><b>${security.twoFactor ? 'On' : 'Off'}</b></div>
+    <div class="mrow"><span>Recovery code</span><b>${security.hasRecovery ? 'Saved' : 'Not generated'}</b></div>
+    ${security.setup
+      ? `<div class="alerts" data-stop="1"><div>Add this key to your authenticator app, then enter the code it shows.</div>
+          <div style="font:600 16px/1.6 ui-monospace,monospace;letter-spacing:1px;word-break:break-all;margin:8px 0" data-code="${esc(security.setup.secret)}">${esc(security.setup.secret)}</div>
+          <button class="btn s g" data-act="copy-recovery" data-code="${esc(security.setup.secret)}">Copy key</button>
+          ${security.setup.uri ? `<a class="btn s g" href="${esc(security.setup.uri)}">Open in app</a>` : ''}</div>
+        <div class="fld"><label for="ac_totp">Code from the app</label><input id="ac_totp" inputmode="numeric" maxlength="6" placeholder="000000"></div>
+        <button class="btn" data-act="2fa-enable">Turn on two-factor</button>`
+      : security.twoFactor
+        ? `<div class="fld"><label for="ac_totp">Current code (to turn it off)</label><input id="ac_totp" inputmode="numeric" maxlength="6" placeholder="000000"></div>
+          <div class="tools"><button class="btn g" data-act="2fa-off">Turn off two-factor</button><button class="btn g" data-act="recovery-new">New recovery code</button></div>`
+        : `<div class="tools"><button class="btn" data-act="2fa-start">Set up two-factor</button><button class="btn g" data-act="recovery-new">${security.hasRecovery ? 'New recovery code' : 'Create recovery code'}</button></div>`}
+  </div>
+
+  <div class="card"><h2>Cloud backup</h2>
+    <p class="mut" style="margin-top:0">Send an encrypted copy of this profile to your own Google Drive or OneDrive.
+      The app never stores your drive password: it keeps a revocable token for the account you pick.</p>
+    ${(S.cloud || []).map((p) => `<div class="mrow"><span>${esc(p.label)}</span><b>${p.linkedAt ? `Linked ${relativetimeFrom(p.linkedAt)}` : p.configured ? 'Not linked' : 'Not configured'}</b>
+      ${p.linkedAt
+        ? `<span class="act"><button class="btn s g" data-act="cloud-upload" data-id="${esc(p.id)}">Back up now</button><button class="btn s r" data-act="cloud-unlink" data-id="${esc(p.id)}">Unlink</button></span>`
+        : p.configured
+          ? `<span class="act"><button class="btn s" data-act="cloud-link" data-id="${esc(p.id)}">Connect</button></span>`
+          : `<span class="act mut">Add credentials</span>`}</span></div>`).join('')}
+    ${(S.cloud || []).some((p) => !p.configured && !p.linkedAt)
+      ? '<p class="hint mut">A provider becomes available once the owner adds its OAuth client id and secret as Worker secrets.</p>'
+      : ''}
   </div>
 
   <div class="card"><h2>Appearance &amp; security</h2>
@@ -456,14 +491,34 @@ export function loginFormHtml(message = '') {
 export function forgotFormHtml(message = '') {
   return `${message ? `<div class="alerts">${esc(message)}</div>` : ''}
     <form id="forgotfrm">
-      <p class="mut" style="margin-top:0">Reset your password using the family PIN or recover access.</p>
+      <p class="mut" style="margin-top:0">Forgot your PIN? Enter the recovery code you saved when the account was
+        created. It is single-use and gives you a new PIN.</p>
+      <div class="fld"><label for="fp_code">Recovery code</label><input id="fp_code" autocomplete="off" autocapitalize="characters" placeholder="XXXX-XXXX-XXXX-XXXX" required></div>
+      <div class="fld"><label for="fp_pin">New PIN (4-12 digits)</label><input id="fp_pin" type="password" inputmode="numeric" autocomplete="new-password" maxlength="12" required></div>
+      <div class="fld"><label for="fp_pin2">Repeat new PIN</label><input id="fp_pin2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="12" required></div>
+      <button class="btn wide">Reset PIN</button>
+    </form>
+    <div class="divider"><span>or reset a password with the family PIN</span></div>
+    <form id="pwresetfrm">
       <div class="fld"><label for="fp_email">Email</label><input id="fp_email" type="email" autocomplete="username" placeholder="you@example.com" required></div>
-      <div class="fld"><label for="fp_pin">Family PIN</label><input id="fp_pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="••••" required></div>
+      <div class="fld"><label for="fp_ownerpin">Family PIN</label><input id="fp_ownerpin" type="password" inputmode="numeric" autocomplete="off" maxlength="12" required></div>
       <div class="fld"><label for="fp_newpass">New password</label><input id="fp_newpass" type="password" autocomplete="new-password" placeholder="At least 8 characters, letters and numbers" required></div>
       <div class="fld"><label for="fp_newpass2">Repeat new password</label><input id="fp_newpass2" type="password" autocomplete="new-password" required></div>
-      <button class="btn wide">Reset password</button>
+      <button class="btn g wide">Reset password</button>
     </form>
     <p class="authswitch"><button class="linkbtn" data-act="tosignin">Back to sign in</button></p>`;
+}
+
+/** Second factor step shown after a correct password or PIN. */
+export function twoFactorFormHtml(message = '') {
+  return `${message ? `<div class="alerts">${esc(message)}</div>` : ''}
+    <form id="totploginfrm">
+      <p class="mut" style="margin-top:0">Two-factor is on for this account. Open your authenticator app and
+        enter the current six digits.</p>
+      <div class="fld"><label for="login_code">Authenticator code</label><input id="login_code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" required></div>
+      <button class="btn wide">Verify and continue</button>
+    </form>
+    <p class="authswitch"><button class="linkbtn" data-act="tosignin">Start over</button></p>`;
 }
 
 export function signupFormHtml(message = '') {

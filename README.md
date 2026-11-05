@@ -231,6 +231,45 @@ interesting half of it on a throwaway database, and the suite is the thing to re
 | Rate limiting | Login/signup: 8 failures per IP per 15 minutes (plus `auth_fails` audit rows). Authenticated writes: 120 per user per minute. Exports: 30 per user per hour. Setup: 5 attempts per IP per hour. |
 | Frontend checks are not trusted | The UI hides controls as a courtesy; the server recomputes every permission. Tests call the API directly to confirm the denials hold. |
 
+## Accounts: several people, one deployment
+
+Every account owns its **own** book. The account created by the first-run setup keeps the original
+`family` book; each later account (signup or a second PIN) is placed in its own `h:<id>` book, and the
+old rows it had written are moved with it once, on the first boot after the upgrade. Sharing is opt-in:
+send an invite from Settings and that account joins your household book as editor, viewer, admin or
+co-owner.
+
+### Forgotten PIN or password
+
+There is no email sender in this deployment, so each account gets a **recovery code** at setup/signup
+(and again from Settings). It is shown once, stored only as a PBKDF2 hash, and is single-use:
+`/api/auth/recover` swaps it for a new PIN and returns a fresh code. The sign-in screen has a
+"Forgot password?" link for both paths (recovery code, or reset a password with the family PIN).
+
+### Two-factor authentication
+
+`Settings → Two-factor & recovery` enrols TOTP (RFC 6238, six digits, 30 s step) with any authenticator
+app; the provisioning URI and key are shown once. The Worker checks the code at login, tolerates one
+step of clock drift, and stores the accepted time step so a code cannot be replayed. Enabling it also
+issues a recovery code, because a lost phone must not mean a lost account. Deleting the secret requires
+a current code. Implementation: `src/twofactor.js`, `verifyTotp()` in `src/store.js`.
+
+### Google Drive / OneDrive backups
+
+The connector in `src/cloud.js` is complete but **inactive until the owner supplies OAuth credentials**:
+
+```bash
+npx wrangler secret put GOOGLE_CLIENT_ID
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+npx wrangler secret put ONEDRIVE_CLIENT_ID
+npx wrangler secret put ONEDRIVE_CLIENT_SECRET
+```
+
+Register `<your-worker-url>/api/cloud/callback/google` (and `/onedrive`) as the redirect URI. Until then
+the API answers `501` with the missing variable name and Settings shows "Not configured", so nothing
+silently fails. Tokens are stored server-side in `cloud_links` and never sent to the browser; the app
+requests Drive's `drive.file` scope (only files it created) and OneDrive's `Files.ReadWrite.AppFolder`.
+
 ## Local development
 
 ```bash

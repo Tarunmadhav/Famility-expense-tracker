@@ -54,14 +54,25 @@ import {
   seedDatabase,
   setMeta,
   sweep,
+  updateAccountName,
   updatePin,
   updateRecord,
   verifyPin,
   wipeRecords,
+  accountHasTotp,
+  beginTotp,
+  createRecoveryCode,
+  disableTotp,
+  getUser,
+  enableTotp,
+  recoverWithCode,
+  totpState,
+  verifyTotp,
 } from './store.js';
 import { removeSubscription, saveSubscription, sendTestPush } from './push.js';
 import { scanReceipt, testConnection } from './ai.js';
 import { encryptionReady } from './fieldcrypto.js';
+import { providerInfo, startConnect, finishConnect, uploadBackup } from './cloud.js';
 import { ICONS } from './icons.js';
 import {
   ROLE_LABEL,
@@ -75,8 +86,8 @@ import {
 } from './profiles.js';
 
 /** Build/api version reported to clients; bump when the API contract changes. */
-const APP_VERSION = '2.1.0';
-const API_VERSION = 9;
+const APP_VERSION = '2.2.0';
+const API_VERSION = 10;
 
 /** Content sniffing: the browser-declared type is never trusted. */
 function sniffMime(head) {
@@ -286,7 +297,7 @@ function spaceFor(raw, session) {
   if (value === 'personal') return `u:${session.userId}`;
   if (value === 'office') return `o:${session.userId}`;
   // Each household keeps its own shared book; 'family' is the original one.
-  return session.household || 'family';
+  return session.household || `h:${session.userId}`;
 }
 
 /**
@@ -319,6 +330,7 @@ function permissionFor(method, path) {
   if (path === '/api/version') return null;
   if (path === '/api/notifications/all') return null;
   if (path.startsWith('/api/profiles')) return null;
+  if (path.startsWith('/api/cloud')) return null;
   if (path === '/api/health') return null;
   if (path === '/api/notifications/read') return 'view';
   if (path.startsWith('/api/admin/')) return 'manage';
@@ -446,9 +458,12 @@ async function handleApi(request, env, ctx, url) {
       throw err;
     }
     if (invite) await redeemInvite(env, invite.code, user.id);
+    const recoveryCode = await createRecoveryCode(env, user.id);
     const token = await createSession(env, user.id, request);
     await audit(env, { action: 'auth.login', actor: user.id, detail: 'signup' });
-    return json({ ok: true, user: { name: user.name, email: user.email } }, 200, { 'Set-Cookie': sessionCookie(token, url) });
+    return json({ ok: true, user: { name: user.name, email: user.email }, recoveryCode }, 200, {
+      'Set-Cookie': sessionCookie(token, url),
+    });
   }
 
   if (path === '/api/auth/setup' && method === 'POST') {
@@ -461,8 +476,10 @@ async function handleApi(request, env, ctx, url) {
     if (!PIN_RE.test(String(body.pin || ''))) throw new HttpError(400, 'PIN must be 4-12 digits');
     const user = await createUser(env, body.name, String(body.pin));
     await seedDatabase(env, user.id);
+    // Shown once: it is the only way to reset a forgotten PIN later.
+    const recoveryCode = await createRecoveryCode(env, user.id);
     const token = await createSession(env, user.id, request);
-    return json({ ok: true, user: { name: user.name } }, 200, {
+    return json({ ok: true, user: { name: user.name }, recoveryCode }, 200, {
       'Set-Cookie': sessionCookie(token, url),
     });
   }
@@ -496,10 +513,42 @@ async function handleApi(request, env, ctx, url) {
         throw new HttpError(401, 'Incorrect PIN');
       }
     }
+    // Second factor: the password/PIN alone never creates a session when TOTP is
+    // enabled. The reply says only that a code is needed, then the client posts
+    // it back with the same credentials.
+    if (await accountHasTotp(env, user.id)) {
+      const code = String(body.code || '').replace(/\s/g, '');
+      if (!code) return json({ twoFactor: true });
+      if (!(await verifyTotp(env, user.id, code))) {
+        await recordAuthFailure(env, ip);
+        await audit(env, { action: 'auth.login_failed', actor: user.id, detail: 'totp' });
+        throw new HttpError(401, 'That authenticator code is not valid');
+      }
+    }
     await clearAuthFailures(env, ip);
     const token = await createSession(env, user.id, request);
     await audit(env, { action: 'auth.login', actor: user.id, detail: body.email ? 'password' : 'pin' });
     return json({ ok: true, user }, 200, { 'Set-Cookie': sessionCookie(token, url) });
+  }
+
+  // Forgot PIN / password: a single-use recovery code is the only proof accepted
+  // here, so knowing an email address or household name is not enough.
+  if (path === '/api/auth/recover' && method === 'POST') {
+    if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    const ip = clientIp(request);
+    if (await isLockedOut(env, ip)) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
+    const body = await readJson(request);
+    const pin = String(body.pin || '');
+    if (!PIN_RE.test(pin)) throw new HttpError(400, 'Use 4-12 digits for the new PIN');
+    const userId = await recoverWithCode(env, body.code, pin);
+    if (!userId) {
+      await recordAuthFailure(env, ip);
+      throw new HttpError(401, 'That recovery code did not match any account');
+    }
+    await clearAuthFailures(env, ip);
+    const fresh = await createRecoveryCode(env, userId);
+    await audit(env, { action: 'auth.recovery', actor: userId });
+    return json({ ok: true, recoveryCode: fresh });
   }
 
   if (path === '/api/auth/reset' && method === 'POST') {
@@ -585,12 +634,21 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true, email });
   }
 
+  if (path === '/api/auth/account' && method === 'PATCH') {
+    const body = await readJson(request);
+    const name = await updateAccountName(env, session.userId, body.name);
+    return json({ ok: true, name });
+  }
+
   if (path === '/api/auth/account' && method === 'GET') {
     const creds = await credentialsFor(env, session.userId);
     const profiles = await listProfiles(env, session.userId);
     const current = profiles.find((p) => p.id === (session.household || 'family')) || profiles[0] || null;
+    const user = await getUser(env, session.userId);
     return json({
       name: session.name,
+      twoFactor: Boolean(user && user.totp_enabled),
+      hasRecovery: Boolean(user && user.has_recovery),
       email: creds ? creds.email : null,
       role: current ? current.role : 'viewer',
       roles: ROLE_LABEL,
@@ -679,6 +737,130 @@ async function handleApi(request, env, ctx, url) {
     await updatePin(env, String(body.newPin));
     await deleteUserSessions(env, session.userId, session.sessionId);
     return json({ ok: true });
+  }
+
+  /* --------------------------------------------- account security (2fa) */
+
+  if (path === '/api/auth/recovery' && method === 'POST') {
+    const recoveryCode = await createRecoveryCode(env, session.userId);
+    await audit(env, { action: 'auth.recovery_code', actor: session.userId });
+    return json({ ok: true, recoveryCode });
+  }
+
+  if (path === '/api/auth/2fa' && method === 'GET') {
+    return json(await totpState(env, session.userId));
+  }
+
+  if (path === '/api/auth/2fa/start' && method === 'POST') {
+    const creds = await credentialsFor(env, session.userId);
+    const account = creds ? creds.email : session.name;
+    const started = await beginTotp(env, session.userId, account);
+    return json({ ok: true, ...started });
+  }
+
+  if (path === '/api/auth/2fa/enable' && method === 'POST') {
+    const body = await readJson(request);
+    await enableTotp(env, session.userId, body.code);
+    // A lost phone must not mean a lost account, so enabling 2FA also issues a
+    // recovery code that resets the PIN without any authenticator.
+    const recoveryCode = await createRecoveryCode(env, session.userId);
+    await audit(env, { action: 'auth.2fa', actor: session.userId, detail: 'enabled' });
+    return json({ ok: true, recoveryCode });
+  }
+
+  if (path === '/api/auth/2fa/disable' && method === 'POST') {
+    const body = await readJson(request);
+    if (await accountHasTotp(env, session.userId)) {
+      if (!(await verifyTotp(env, session.userId, body.code))) {
+        throw new HttpError(401, 'Enter a current authenticator code to turn 2FA off');
+      }
+    }
+    await disableTotp(env, session.userId);
+    await audit(env, { action: 'auth.2fa', actor: session.userId, detail: 'disabled' });
+    return json({ ok: true });
+  }
+
+  /* ------------------------------------------------ cloud backup links */
+
+  if (path === '/api/cloud' && method === 'GET') {
+    const rows = (await env.DB.prepare(
+      `SELECT provider, created_at FROM cloud_links WHERE user_id = ?`,
+    )
+      .bind(session.userId)
+      .all()).results || [];
+    const linked = Object.fromEntries(rows.map((r) => [r.provider, r.created_at]));
+    return json({
+      providers: providerInfo(env).map((p) => ({ ...p, linkedAt: linked[p.id] || null })),
+    });
+  }
+
+  if (path === '/api/cloud/link' && method === 'POST') {
+    const body = await readJson(request);
+    const provider = String(body.provider || '');
+    const redirectUri = `${url.origin}/api/cloud/callback/${provider}`;
+    const started = await startConnect(env, provider, session.userId, redirectUri);
+    return json({ ok: true, url: started.url });
+  }
+
+  if (path === '/api/cloud/unlink' && method === 'POST') {
+    const body = await readJson(request);
+    await env.DB.prepare(`DELETE FROM cloud_links WHERE user_id = ? AND provider = ?`)
+      .bind(session.userId, String(body.provider || ''))
+      .run();
+    return json({ ok: true });
+  }
+
+  const cloudCallback = path.match(/^\/api\/cloud\/callback\/([a-z]{1,20})$/);
+  if (cloudCallback && method === 'GET') {
+    const provider = cloudCallback[1];
+    const error = url.searchParams.get('error');
+    const back = new URL('/settings?cloud=', url.origin);
+    if (error) {
+      back.searchParams.set('cloud', 'denied');
+      return Response.redirect(back.toString(), 302);
+    }
+    try {
+      const linked = await finishConnect(env, provider, url.searchParams.get('code'), url.searchParams.get('state'));
+      await env.DB.prepare(
+        `INSERT INTO cloud_links (user_id, provider, refresh_token, access_token, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, provider) DO UPDATE SET refresh_token = excluded.refresh_token,
+           access_token = excluded.access_token, expires_at = excluded.expires_at`,
+      )
+        .bind(linked.userId, linked.provider, linked.refreshToken, linked.accessToken, linked.expiresAt, Date.now())
+        .run();
+      back.searchParams.set('cloud', 'connected');
+    } catch {
+      back.searchParams.set('cloud', 'failed');
+    }
+    return Response.redirect(back.toString(), 302);
+  }
+
+  if (path === '/api/cloud/backup' && method === 'POST') {
+    const body = await readJson(request);
+    const provider = String(body.provider || '');
+    const saved = await env.DB.prepare(
+      `SELECT provider, refresh_token, access_token, expires_at FROM cloud_links WHERE user_id = ? AND provider = ?`,
+    )
+      .bind(session.userId, provider)
+      .first();
+    if (!saved) throw new HttpError(400, 'Connect that drive first');
+    const data = body.data && typeof body.data === 'object' ? body.data : null;
+    if (!data) throw new HttpError(400, 'Nothing to upload');
+    const filename = `family-planner-${new Date().toISOString().slice(0, 10)}.json`;
+    const out = await uploadBackup(
+      env,
+      {
+        provider,
+        refreshToken: saved.refresh_token,
+        accessToken: saved.access_token,
+        expiresAt: saved.expires_at,
+      },
+      filename,
+      data,
+    );
+    await audit(env, { action: 'backup.create', actor: session.userId, profileId: space, target: provider });
+    return json({ ...out, filename });
   }
 
   if (path === '/api/auth/sessions' && method === 'GET') {

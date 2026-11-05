@@ -386,6 +386,27 @@ input.search { flex: 1 1 220px; min-width: 160px; }
   .btn.s { min-height: 34px; }
 }
 
+@media (max-width: 560px) {
+  /* Phones stacked a title row, a subtitle, a coloured section bar and the page
+     heading one under the other. Keep one compact header and let the content
+     start immediately. */
+  .topbar { padding: 8px 12px; gap: 8px; }
+  .tbsub, .synctext { display: none; }
+  .tb-title h1 { font-size: 14px; }
+  .sync { padding: 3px 7px; }
+  .content { padding-top: 10px; padding-bottom: 82px; }
+  .bar { padding: 7px 10px; font-size: 10.5px; border-radius: 8px; margin-bottom: 8px; }
+  .card { padding: 12px; border-radius: 12px; }
+  .card > h2 { font-size: 14px; margin-bottom: 8px; }
+  .hero h2 { font-size: 16px; }
+  .stats { gap: 8px; }
+  .kpi .v { font-size: 17px; }
+  .grid.kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tools { gap: 6px; }
+  .fld { margin-bottom: 8px; }
+  .modal .card { margin: 6vh auto; }
+}
+
 @media (min-width: 901px) {
   .only-mobile { display: none; }
 }

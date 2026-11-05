@@ -7,8 +7,9 @@ import { generateVapidKeys, sendPushToAll } from './push.js';
 import { protectDoc, revealDoc, encryptionReady } from './fieldcrypto.js';
 import { HttpError } from './errors.js';
 import { ensureProfiles, spaceForProfile } from './profiles.js';
+import { matchTotp, newRecoveryCode, normaliseRecoveryCode, otpauthUri, randomBase32 } from './twofactor.js';
 
-export const SCHEMA_VERSION = '9';
+export const SCHEMA_VERSION = '10';
 // 100 000 is the maximum iteration count the production Workers runtime supports
 // for PBKDF2-SHA256; attempts are additionally rate limited (8 per 15 minutes per IP).
 const PBKDF2_ITERATIONS = 100000;
@@ -31,6 +32,7 @@ const STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS auth_fails (ip TEXT NOT NULL, ts INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS auth_fails_idx ON auth_fails (ip, ts)`,
   `CREATE TABLE IF NOT EXISTS credentials (user_id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, password_salt TEXT, iterations INTEGER, created_at INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS cloud_links (user_id TEXT NOT NULL, provider TEXT NOT NULL, refresh_token TEXT, access_token TEXT, expires_at INTEGER, created_at INTEGER, PRIMARY KEY (user_id, provider))`,
   `CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, space TEXT NOT NULL DEFAULT 'family', name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, key TEXT UNIQUE NOT NULL, collection TEXT, record_id TEXT, uploaded_by TEXT, created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS files_created_idx ON files (space, created_at DESC)`,
   `CREATE TABLE IF NOT EXISTS ai_connections (id TEXT PRIMARY KEY, provider TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL, api_key TEXT NOT NULL, created_by TEXT, created_at INTEGER NOT NULL, profile_id TEXT)`,
@@ -147,6 +149,12 @@ export async function ensureSchema(env) {
   for (const [table, column, ddl] of [
     ['push_subs', 'user_id', 'ALTER TABLE push_subs ADD COLUMN user_id TEXT'],
     ['ai_connections', 'profile_id', 'ALTER TABLE ai_connections ADD COLUMN profile_id TEXT'],
+    ['users', 'recovery_hash', 'ALTER TABLE users ADD COLUMN recovery_hash TEXT'],
+    ['users', 'recovery_salt', 'ALTER TABLE users ADD COLUMN recovery_salt TEXT'],
+    ['users', 'totp_secret', 'ALTER TABLE users ADD COLUMN totp_secret TEXT'],
+    ['users', 'totp_enabled', 'ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0'],
+    ['users', 'totp_last_step', 'ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0'],
+    ['users', 'updated_at', 'ALTER TABLE users ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0'],
   ]) {
     if (!(await hasColumn(env, table, column))) {
       try {
@@ -160,6 +168,8 @@ export async function ensureSchema(env) {
   // profile of its household. Additive and idempotent, so a deploy never locks
   // anyone out of data they could already read.
   await ensureProfiles(env);
+  // Accounts that were created inside another person's book get their own one.
+  await splitMixedHouseholds(env);
   await env.DB.prepare(
     `INSERT INTO meta (k, v) VALUES ('schema', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
   )
@@ -253,11 +263,13 @@ export async function createUser(env, name, pin) {
   const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
   const hash = await derivePin(pin, salt, PBKDF2_ITERATIONS);
   const id = crypto.randomUUID();
-  // The account that sets up the household owns it; later accounts are members
-  // until an owner invites them.
-  const isFirst = (await countUsers(env)) === 0;
+  // The account that sets up the planner owns the original household book. A
+  // second PIN account gets its own book instead of silently sharing the first
+  // one, which is how two people used to end up writing into the same rows.
+  const first = (await countUsers(env)) === 0;
+  const home = first ? 'family' : `h:${id}`;
   await env.DB.prepare(
-    `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at, role, household) VALUES (?, ?, ?, ?, ?, ?, ?, 'family')`,
+    `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at, role, household) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -266,18 +278,193 @@ export async function createUser(env, name, pin) {
       salt,
       PBKDF2_ITERATIONS,
       Date.now(),
-      isFirst ? 'owner' : 'member',
+      'owner',
+      home,
     )
     .run();
   await ensureProfiles(env);
-  return { id, name, role: isFirst ? 'owner' : 'member' };
+  return { id, name, role: 'owner', household: home };
 }
 
+/**
+ * PIN sign-in. Every account that has a PIN is checked, so a second person's PIN
+ * opens their own plan instead of only ever matching the first row in `users`.
+ * PINs are only 4-12 digits, so the caller's lockout still matters here.
+ */
 export async function verifyPin(env, pin) {
-  const user = await env.DB.prepare(`SELECT * FROM users WHERE length(pin_hash) > 0 ORDER BY created_at LIMIT 1`).first();
-  if (!user) return null;
-  const candidate = await derivePin(pin, user.pin_salt, user.iterations);
-  return timingSafeEqual(candidate, user.pin_hash) ? { id: user.id, name: user.name } : null;
+  const rows = (await env.DB.prepare(
+    `SELECT id, name, household, pin_hash, pin_salt, iterations FROM users WHERE length(pin_hash) > 0`,
+  ).all()).results || [];
+  const value = String(pin || '');
+  let match = null;
+  for (const user of rows) {
+    const candidate = await derivePin(value, user.pin_salt, user.iterations || PBKDF2_ITERATIONS);
+    // Compare every row so the response time does not depend on which PIN matched.
+    if (timingSafeEqual(candidate, user.pin_hash)) match = { id: user.id, name: user.name };
+  }
+  return match;
+}
+
+export async function getUser(env, userId) {
+  return env.DB.prepare(
+    `SELECT id, name, role, household, created_at, totp_enabled, totp_secret, totp_last_step, length(recovery_hash) AS has_recovery
+       FROM users WHERE id = ?`,
+  )
+    .bind(String(userId))
+    .first();
+}
+
+/** Rename the signed-in account; the email stays with the credential row. */
+export async function updateAccountName(env, userId, name) {
+  const clean = String(name || '').trim().slice(0, 60);
+  if (!clean) throw new HttpError(400, 'Enter a name');
+  await env.DB.prepare(`UPDATE users SET name = ?, updated_at = ? WHERE id = ?`)
+    .bind(clean, Date.now(), String(userId))
+    .run();
+  return clean;
+}
+
+/** Replace the PIN for one account (not the household PIN of an older build). */
+export async function setUserPin(env, userId, pin) {
+  const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
+  const hash = await derivePin(String(pin), salt, PBKDF2_ITERATIONS);
+  await env.DB.prepare(
+    `UPDATE users SET pin_hash = ?, pin_salt = ?, iterations = ?, updated_at = ? WHERE id = ?`,
+  )
+    .bind(hash, salt, PBKDF2_ITERATIONS, Date.now(), String(userId))
+    .run();
+}
+
+/**
+ * A recovery code is the only way back in when the PIN is forgotten: there is no
+ * email sender in this deployment, so the code is generated once and shown to
+ * the person who must keep it. Only its PBKDF2 hash is stored.
+ */
+export async function createRecoveryCode(env, userId) {
+  const code = newRecoveryCode();
+  const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
+  const hash = await derivePin(normaliseRecoveryCode(code), salt, PBKDF2_ITERATIONS);
+  await env.DB.prepare(
+    `UPDATE users SET recovery_hash = ?, recovery_salt = ?, updated_at = ? WHERE id = ?`,
+  )
+    .bind(hash, salt, Date.now(), String(userId))
+    .run();
+  return code;
+}
+
+/**
+ * Reset a PIN with a recovery code. Returns the user id on success. The code is
+ * single-use: it is replaced by a freshly generated one, which the caller shows
+ * and the user stores again.
+ */
+export async function recoverWithCode(env, code, newPin) {
+  const normalised = normaliseRecoveryCode(code);
+  if (normalised.length < 12) throw new HttpError(400, 'Enter the full recovery code');
+  const rows = (await env.DB.prepare(
+    `SELECT id, recovery_hash, recovery_salt, iterations FROM users WHERE length(recovery_hash) > 0`,
+  ).all()).results || [];
+  let found = null;
+  for (const row of rows) {
+    const candidate = await derivePin(normalised, row.recovery_salt, row.iterations || PBKDF2_ITERATIONS);
+    if (timingSafeEqual(candidate, row.recovery_hash)) found = row;
+  }
+  if (!found) return null;
+  await setUserPin(env, found.id, newPin);
+  await deleteUserSessions(env, found.id);
+  return found.id;
+}
+
+/* ------------------------------------------------------------------- 2fa */
+
+export async function totpState(env, userId) {
+  const user = await getUser(env, userId);
+  return { enabled: Boolean(user && user.totp_enabled), pending: Boolean(user && user.totp_secret && !user.totp_enabled) };
+}
+
+/** Start enrolment: generate and store a secret that is not active yet. */
+export async function beginTotp(env, userId, account) {
+  const user = await getUser(env, userId);
+  // Never let a setup call silently drop an active second factor.
+  if (user && user.totp_enabled) throw new HttpError(400, 'Two-factor is already on. Turn it off first.');
+  const secret = randomBase32(20);
+  await env.DB.prepare(`UPDATE users SET totp_secret = ?, totp_enabled = 0, totp_last_step = 0 WHERE id = ?`)
+    .bind(secret, String(userId))
+    .run();
+  return { secret, uri: otpauthUri({ secret, account }) };
+}
+
+export async function enableTotp(env, userId, code) {
+  const user = await getUser(env, userId);
+  if (!user || !user.totp_secret) throw new HttpError(400, 'Start the setup again');
+  const step = await matchTotp(user.totp_secret, code, 0);
+  if (!step) throw new HttpError(400, 'That code is not valid. Check the clock on your phone.');
+  await env.DB.prepare(`UPDATE users SET totp_enabled = 1, totp_last_step = ? WHERE id = ?`)
+    .bind(step, String(userId))
+    .run();
+  return true;
+}
+
+export async function disableTotp(env, userId) {
+  await env.DB.prepare(`UPDATE users SET totp_enabled = 0, totp_secret = NULL, totp_last_step = 0 WHERE id = ?`)
+    .bind(String(userId))
+    .run();
+}
+
+/**
+ * Verify a login code and burn the time step it belongs to, so the same six
+ * digits cannot be used twice (RFC 6238 section 5.2).
+ */
+export async function verifyTotp(env, userId, code) {
+  const user = await getUser(env, userId);
+  if (!user || !user.totp_enabled || !user.totp_secret) return true;
+  const step = await matchTotp(user.totp_secret, code, user.totp_last_step || 0);
+  if (!step) return false;
+  await env.DB.prepare(`UPDATE users SET totp_last_step = ? WHERE id = ?`).bind(step, String(userId)).run();
+  return true;
+}
+
+export async function accountHasTotp(env, userId) {
+  const user = await getUser(env, userId);
+  return Boolean(user && user.totp_enabled);
+}
+
+/**
+ * One-time repair for databases created before signup accounts got their own
+ * book: accounts that are not the household owner are moved to `h:<id>` and the
+ * rows they wrote follow them, so nothing is lost and nobody sees a stranger's
+ * data any more.
+ */
+export async function splitMixedHouseholds(env) {
+  if (await getMeta(env, 'household_split', 0)) return 0;
+  const users = (await env.DB.prepare(
+    `SELECT id, role, household FROM users ORDER BY created_at`,
+  ).all()).results || [];
+  const owner = users.find((u) => (u.household || 'family') === 'family');
+  if (!owner) {
+    await setMeta(env, 'household_split', Date.now());
+    return 0;
+  }
+  let moved = 0;
+  for (const user of users) {
+    if (user === owner || (user.household || 'family') !== 'family') continue;
+    const home = `h:${user.id}`;
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE users SET household = ?, role = 'owner' WHERE id = ?`).bind(home, user.id),
+      env.DB.prepare(`UPDATE records SET space = ? WHERE space = 'family' AND updated_by = ?`).bind(home, user.id),
+    ]);
+    try {
+      await env.DB.prepare(`UPDATE files SET space = ? WHERE space = 'family' AND user_id = ?`).bind(home, user.id).run();
+    } catch {
+      /* older databases have no user_id column on files */
+    }
+    await env.DB.prepare(`DELETE FROM profile_members WHERE profile_id = 'family' AND user_id = ?`)
+      .bind(user.id)
+      .run();
+    moved += 1;
+  }
+  await ensureProfiles(env);
+  await setMeta(env, 'household_split', Date.now());
+  return moved;
 }
 
 /* --------------------------------------------- email + password accounts */

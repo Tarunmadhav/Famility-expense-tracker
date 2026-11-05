@@ -178,7 +178,12 @@ export async function ensureProfiles(env) {
  * caller really is a member. Returns the profile plus the caller's role.
  */
 export async function resolveProfile(env, session, requested, permission = 'view') {
-  const wanted = String(requested || '').slice(0, 80) || session.household || 'family';
+  // Never fall back to the shared literal 'family': a session without a
+  // household belongs to its own account, so its own book is the only safe
+  // default. Without this, two accounts with a missing household id resolved to
+  // the same profile and saw each other's rows.
+  const fallback = session.household || (session.userId ? `h:${session.userId}` : '');
+  const wanted = String(requested || '').slice(0, 80) || fallback;
   const row = await profileById(env, wanted);
   if (!row) throw new HttpError(404, 'That profile does not exist');
 
@@ -313,6 +318,9 @@ const AUDIT_ACTIONS = new Set([
   'auth.logout',
   'auth.lock',
   'auth.password',
+  'auth.recovery',
+  'auth.recovery_code',
+  'auth.2fa',
   'profile.switch',
   'profile.create',
   'profile.role',

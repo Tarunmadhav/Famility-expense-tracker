@@ -1,7 +1,7 @@
 {
   "name": "family-finance-planner",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.2.0",
   "type": "module",
   "description": "Family Finance Planner - realtime web + Android app with analytics, notifications and a D1 database",
   "scripts": {

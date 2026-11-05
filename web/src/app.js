@@ -100,6 +100,21 @@ function app() {
   return document.getElementById('app');
 }
 
+/** One-time recovery code, shown in a modal the user must copy before closing. */
+function showRecoveryCode(code, note) {
+  if (!code) return;
+  const modal = document.getElementById('modal');
+  if (!modal) return;
+  modal.innerHTML = `<div class="modal" data-stop="1"><div class="card" style="max-width:420px;margin:12vh auto" data-stop="1">
+    <h2>Recovery code</h2>
+    <p class="mut" style="margin-top:0">${esc(note || 'Keep this offline. It is shown only once.')}</p>
+    <div style="font:600 18px/1.6 ui-monospace,monospace;letter-spacing:1px;padding:12px;border-radius:10px;background:rgba(52,211,153,.12);text-align:center" data-code="${esc(code)}">${esc(code)}</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn g" data-act="copy-recovery" data-code="${esc(code)}">Copy</button>
+      <button class="btn" data-act="close">Done</button>
+    </div></div></div>`;
+}
+
 function setView(view, message = '') {
   S.view = view;
   S.error = message;
@@ -110,6 +125,9 @@ function setView(view, message = '') {
 
 function render() {
   closeBellOnOutside();
+  // Drop the static boot splash the first time we paint a real screen.
+  const boot = document.getElementById('boot');
+  if (boot) boot.remove();
   if (S.locked) {
     app().innerHTML = views.lockHtml(S.lockError || '');
     const input = document.getElementById('lockpin');
@@ -128,11 +146,21 @@ function render() {
       return;
     }
     let formHtml;
-    if (S.authView === 'forgot') formHtml = views.forgotFormHtml(S.error);
+    if (S.authView === '2fa') formHtml = views.twoFactorFormHtml(S.error);
+    else if (S.authView === 'forgot') formHtml = views.forgotFormHtml(S.error);
     else if (S.authView === 'signup') formHtml = views.signupFormHtml(S.error);
     else formHtml = views.loginFormHtml(S.error);
     app().innerHTML = views.authShell(formHtml);
-    const first = document.getElementById(S.authView === 'signup' ? 'su_name' : S.authView === 'forgot' ? 'fp_email' : 'email') || document.getElementById('pin');
+    const first =
+      document.getElementById(
+        S.authView === 'signup'
+          ? 'su_name'
+          : S.authView === 'forgot'
+            ? 'fp_code'
+            : S.authView === '2fa'
+              ? 'login_code'
+              : 'email',
+      ) || document.getElementById('pin');
     if (first) first.focus();
     return;
   }
@@ -502,6 +530,13 @@ document.addEventListener('click', async (event) => {
   const collection = target.getAttribute('data-ek');
   const id = target.getAttribute('data-id');
 
+  if (act === 'copy-recovery') {
+    const code = target.getAttribute('data-code') || '';
+    if (navigator.clipboard) navigator.clipboard.writeText(code).then(() => toast('Copied'), () => toast('Copy failed'));
+    else toast('Copy failed');
+    return;
+  }
+
   if (act === 'close') {
     if (target.classList.contains('modal') && event.target !== target) return;
     document.getElementById('modal').innerHTML = '';
@@ -688,6 +723,74 @@ document.addEventListener('click', async (event) => {
       return render();
     case 'save-password':
       return savePassword();
+    case 'save-name':
+      await guard(async () => {
+        const name = document.getElementById('ac_name').value.trim();
+        const out = await api.renameAccount(name);
+        S.me.name = out.name;
+        render();
+        toast('Name updated');
+      });
+      return undefined;
+    case '2fa-start':
+      await guard(async () => {
+        const out = await api.startTwoFactor();
+        S.security = { ...(S.security || {}), twoFactor: false, setup: { secret: out.secret, uri: out.uri } };
+        render();
+      });
+      return undefined;
+    case '2fa-enable':
+      await guard(async () => {
+        const code = document.getElementById('ac_totp').value.trim();
+        const out = await api.enableTwoFactor(code);
+        S.security = { twoFactor: true, hasRecovery: true, setup: null };
+        render();
+        showRecoveryCode(out && out.recoveryCode, 'Two-factor is on. Save this recovery code.');
+      });
+      return undefined;
+    case '2fa-off':
+      await guard(async () => {
+        const code = document.getElementById('ac_totp').value.trim();
+        if (!confirm('Turn off two-factor for this account?')) return;
+        await api.disableTwoFactor(code);
+        S.security = { ...(S.security || {}), twoFactor: false, setup: null };
+        render();
+        toast('Two-factor turned off');
+      });
+      return undefined;
+    case 'cloud-link':
+      await guard(async () => {
+        const out = await api.cloudLinkStart(id);
+        if (out && out.url) window.location.href = out.url;
+      });
+      return undefined;
+    case 'cloud-unlink':
+      await guard(async () => {
+        await api.cloudUnlink(id);
+        await loadSettingsData();
+        render();
+        toast('Drive unlinked');
+      });
+      return undefined;
+    case 'cloud-upload':
+      await guard(async () => {
+        const out = await api.cloudBackup(id, {
+          exportedAt: new Date().toISOString(),
+          profile: S.profile,
+          settings: S.settings,
+          data: S.db,
+        });
+        toast(`Backed up to ${id === 'google' ? 'Google Drive' : 'OneDrive'} (${out.filename})`);
+      });
+      return undefined;
+    case 'recovery-new':
+      await guard(async () => {
+        const out = await api.newRecoveryCode();
+        S.security = { ...(S.security || {}), hasRecovery: true };
+        render();
+        showRecoveryCode(out && out.recoveryCode, 'Your previous recovery code no longer works.');
+      });
+      return undefined;
     case 'ai-add':
       return addAi();
     case 'ai-test':
@@ -854,7 +957,13 @@ document.addEventListener('change', async (event) => {
       const password = document.getElementById('password').value;
       if (!email || !password) return toast('Enter your email and password');
       await guard(async () => {
-        await api.login({ email, password });
+        const out = await api.login({ email, password });
+        if (out && out.twoFactor) {
+          S.pendingLogin = { email, password };
+          S.authView = '2fa';
+          S.error = '';
+          return render();
+        }
         S.error = '';
         await loadApp();
       }, 'Email or password is incorrect');
@@ -863,14 +972,35 @@ document.addEventListener('change', async (event) => {
       const pin = document.getElementById('pin').value.trim();
       if (!pin) return toast('Enter the family PIN');
       await guard(async () => {
-        await api.login({ pin });
+        const out = await api.login({ pin });
+        if (out && out.twoFactor) {
+          S.pendingLogin = { pin };
+          S.authView = '2fa';
+          S.error = '';
+          return render();
+        }
         S.error = '';
         await loadApp();
       }, 'Incorrect PIN');
     } else if (form.id === 'forgotfrm') {
       event.preventDefault();
-      const email = document.getElementById('fp_email').value.trim();
+      const code = document.getElementById('fp_code').value.trim();
       const pin = document.getElementById('fp_pin').value.trim();
+      const again = document.getElementById('fp_pin2').value.trim();
+      if (!code) return toast('Enter your recovery code');
+      if (!/^\d{4,12}$/.test(pin)) return toast('The new PIN must be 4-12 digits');
+      if (pin !== again) return toast('The two PINs do not match');
+      await guard(async () => {
+        const out = await api.recoverPin(code, pin);
+        S.error = '';
+        S.authView = 'login';
+        render();
+        showRecoveryCode(out && out.recoveryCode, 'PIN reset. Save your new recovery code.');
+      });
+    } else if (form.id === 'pwresetfrm') {
+      event.preventDefault();
+      const email = document.getElementById('fp_email').value.trim();
+      const pin = document.getElementById('fp_ownerpin').value.trim();
       const password = document.getElementById('fp_newpass').value;
       const again = document.getElementById('fp_newpass2').value;
       if (!email || !pin) return toast('Enter your email and family PIN');
@@ -882,6 +1012,16 @@ document.addEventListener('change', async (event) => {
         toast('Password reset. Sign in with your new password.');
         render();
       });
+    } else if (form.id === 'totploginfrm') {
+      event.preventDefault();
+      const code = document.getElementById('login_code').value.trim();
+      if (!code) return toast('Enter the six-digit code');
+      await guard(async () => {
+        await api.login({ ...(S.pendingLogin || {}), code });
+        S.pendingLogin = null;
+        S.error = '';
+        await loadApp();
+      }, 'That code was not accepted');
     } else if (form.id === 'signupfrm') {
       event.preventDefault();
       const name = document.getElementById('su_name').value.trim();
@@ -891,10 +1031,11 @@ document.addEventListener('change', async (event) => {
       const code = document.getElementById('su_code').value.trim();
       if (password !== again) return toast('The two passwords do not match');
       await guard(async () => {
-        await api.signup(name, email, password, code);
+        const out = await api.signup(name, email, password, code);
         S.error = '';
         await loadApp();
         toast('Account created');
+        showRecoveryCode(out && out.recoveryCode, 'Save this recovery code. It is shown only once.');
       });
     } else if (form.id === 'setupfrm') {
     event.preventDefault();
@@ -904,9 +1045,10 @@ document.addEventListener('change', async (event) => {
     if (!/^\d{4,12}$/.test(pin)) return toast('PIN must be 4-12 digits');
     if (pin !== pin2) return toast('The two PINs do not match');
     await guard(async () => {
-      await api.setup(household, pin);
+      const out = await api.setup(household, pin);
       await loadApp();
       toast('Planner created');
+      showRecoveryCode(out && out.recoveryCode, 'Save this recovery code. It is the only way to reset a forgotten PIN.');
     });
   } else if (form.id === 'lockfrm') {
     event.preventDefault();
@@ -1055,7 +1197,7 @@ async function guard(fn, fallbackMessage = '') {
 
 async function loadSettingsData() {
   try {
-    const [activity, sessions, account, files, ai, family, members, audit] = await Promise.all([
+    const [activity, sessions, account, files, ai, family, members, audit, twofa] = await Promise.all([
       api.activity(),
       api.sessions(),
       api.account(),
@@ -1064,7 +1206,15 @@ async function loadSettingsData() {
       api.familyMembers(),
       api.profileMembers(S.profileId).catch(() => ({ members: [] })),
       api.auditLog(40).catch(() => ({ events: [] })),
+      api.twoFactorState().catch(() => ({ enabled: false })),
     ]);
+    S.cloud = await api.cloudLinks().then((out) => out.providers || []).catch(() => []);
+    S.security = {
+      twoFactor: Boolean(twofa.enabled),
+      hasRecovery: Boolean(account && account.hasRecovery),
+      // Keep a pending enrolment visible across a re-render.
+      setup: (S.security && S.security.setup) || null,
+    };
     S.members = family.members || [];
     S.profileMembers = members.members || [];
     S.audit = audit.events || [];

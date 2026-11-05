@@ -19,6 +19,24 @@
   <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
+  <!-- Painted before the bundle downloads, so a cold start shows the brand instead
+       of an empty page. app.js replaces it on its first render. -->
+  <div id="boot" role="status" aria-live="polite">
+    <div class="bootcard">
+      <div class="bootlogo">₹</div>
+      <h1>Family Finance Planner</h1>
+      <div class="bootline"></div>
+    </div>
+  </div>
+  <style>
+    #boot{position:fixed;inset:0;display:grid;place-items:center;background:#0f172a;color:#fff;z-index:50;font:600 16px/1.4 system-ui,sans-serif}
+    #boot .bootcard{text-align:center;display:grid;gap:10px;justify-items:center}
+    #boot h1{font-size:18px;margin:0;font-weight:600}
+    #boot .bootlogo{width:56px;height:56px;border-radius:16px;display:grid;place-items:center;font-size:28px;color:#0f172a;background:#34d399}
+    #boot .bootline{width:120px;height:3px;border-radius:2px;background:linear-gradient(90deg,transparent,#34d399,transparent);background-size:120px 3px;animation:bootslide 1.1s linear infinite}
+    @keyframes bootslide{from{background-position:-120px 0}to{background-position:120px 0}}
+    @media (prefers-reduced-motion:reduce){#boot .bootline{animation:none}}
+  </style>
   <div id="app"></div>
   <div id="modal"></div>
   <noscript>This planner needs JavaScript to run.</noscript>

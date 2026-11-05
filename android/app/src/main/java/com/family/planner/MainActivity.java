@@ -14,8 +14,15 @@ import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
+import android.graphics.Color;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.view.Gravity;
+import android.view.View;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
 /**
@@ -36,6 +43,7 @@ public class MainActivity extends Activity {
     private static final int NOTIFICATION_PERMISSION = 7;
 
     private WebView web;
+    private View splash;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -44,6 +52,7 @@ public class MainActivity extends Activity {
         requestNotificationPermission();
 
         web = new WebView(this);
+        web.setBackgroundColor(Color.parseColor("#0F172A"));
         WebSettings settings = web.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -51,7 +60,14 @@ public class MainActivity extends Activity {
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        settings.setUserAgentString(settings.getUserAgentString() + " FamilyPlannerApp/2.0");
+        // Keep the rendered app and its assets on disk so a warm start paints from
+        // cache while the network request for fresh data is still in flight.
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        settings.setSupportZoom(false);
+        settings.setMediaPlaybackRequiresUserGesture(true);
+        settings.setUserAgentString(settings.getUserAgentString() + " FamilyPlannerApp/2.1");
 
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, false);
@@ -70,10 +86,70 @@ public class MainActivity extends Activity {
                 }
                 return true;
             }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                hideSplash();
+                CookieManager.getInstance().flush();
+            }
         });
 
-        setContentView(web);
+        // The splash is native, so the first frame is instant instead of a white
+        // rectangle that waits for DNS, TLS and the Worker cold start.
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.parseColor("#0F172A"));
+        root.addView(web, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        splash = buildSplash();
+        root.addView(splash, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        setContentView(root);
         web.loadUrl(START_URL);
+    }
+
+    private View buildSplash() {
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setGravity(Gravity.CENTER);
+        column.setBackgroundColor(Color.parseColor("#0F172A"));
+
+        TextView logo = new TextView(this);
+        logo.setText("₹");
+        logo.setTextSize(44f);
+        logo.setGravity(Gravity.CENTER);
+        logo.setTextColor(Color.parseColor("#34D399"));
+
+        TextView title = new TextView(this);
+        title.setText("Family Finance Planner");
+        title.setTextSize(20f);
+        title.setGravity(Gravity.CENTER);
+        title.setTextColor(Color.WHITE);
+
+        TextView hint = new TextView(this);
+        hint.setText("Opening your planner…");
+        hint.setTextSize(13f);
+        hint.setGravity(Gravity.CENTER);
+        hint.setTextColor(Color.parseColor("#94A3B8"));
+
+        ProgressBar bar = new ProgressBar(this);
+        bar.setIndeterminate(true);
+
+        column.addView(logo);
+        column.addView(title);
+        column.addView(hint);
+        column.addView(bar);
+        return column;
+    }
+
+    private void hideSplash() {
+        if (splash == null || splash.getVisibility() != View.VISIBLE) return;
+        splash.animate().alpha(0f).setDuration(150).withEndAction(new Runnable() {
+            @Override
+            public void run() {
+                if (splash != null) splash.setVisibility(View.GONE);
+            }
+        }).start();
     }
 
     private void createChannel() {
