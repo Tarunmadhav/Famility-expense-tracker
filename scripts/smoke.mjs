@@ -320,8 +320,11 @@ const officeBlocked = await call('/api/records', {
 ok('office book rejects personal modules', officeBlocked.status === 400, `got ${officeBlocked.status}`);
 
 // Runs after the office check so the limiter does not block it.
+// The limiter counts inside a fixed one-minute window, so a slow runner that
+// straddles a minute boundary resets the counter. 260 attempts are more than two
+// full windows, which makes the check deterministic instead of flaky.
 let limitedAt = 0;
-for (let i = 0; i < 140 && !limitedAt; i += 1) {
+for (let i = 0; i < 260 && !limitedAt; i += 1) {
   const res = await call('/api/notifications/read', { method: 'POST', body: { ids: [] } });
   if (res.status === 429) limitedAt = i + 1;
 }
