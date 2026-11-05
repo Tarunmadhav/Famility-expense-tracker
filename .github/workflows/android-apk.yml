@@ -277,10 +277,13 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
 
+  # Every push to main publishes the debug APK, because that is the build that is
+  # installable without any repository secrets. When the signing secrets exist the
+  # signed release is attached to the same release as well.
   release-push:
     name: release-push
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.signing-ready.outputs.ready == 'true'
-    needs: [signing-ready, build-apk, build-debug, upload]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build-debug.result == 'success'
+    needs: [build-debug, build-apk]
     runs-on: ubuntu-latest
     permissions:
       contents: write
