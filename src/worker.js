@@ -58,6 +58,7 @@ import {
   updatePin,
   updateRecord,
   verifyPin,
+  verifyUserPin,
   wipeRecords,
   accountHasTotp,
   beginTotp,
@@ -92,8 +93,8 @@ import {
 } from './profiles.js';
 
 /** Build/api version reported to clients; bump when the API contract changes. */
-const APP_VERSION = '2.3.0';
-const API_VERSION = 11;
+const APP_VERSION = '2.3.1';
+const API_VERSION = 12;
 
 /** Content sniffing: the browser-declared type is never trusted. */
 function sniffMime(head) {
@@ -156,7 +157,11 @@ export default {
         return json({ error: err.message }, err.status);
       }
       const message = err && err.message ? err.message : String(err);
-      const missingDb = /no such table|D1_ERROR|binding/i.test(message);
+      // A constraint violation is a bug in the calling route, not an uninitialised
+      // database: matching the bare D1_ERROR prefix used to label every failed D1
+      // write the same way and hide the real cause.
+      const constraint = /UNIQUE constraint failed|NOT NULL constraint failed|FOREIGN KEY constraint failed/i.test(message);
+      const missingDb = !constraint && /no such table|no such column|no such index|binding/i.test(message);
       // Diagnostics stay in the Worker log. The response carries no SQL text,
       // stack frame, binding name or column detail.
       console.error('unhandled', pathOf(request), message.slice(0, 500));
@@ -718,9 +723,20 @@ async function handleApi(request, env, ctx, url) {
     const email = normaliseEmail(body.email || (await credentialsFor(env, session.userId))?.email || '');
     if (!isEmail(email)) throw new HttpError(400, 'Enter the email to sign in with');
     if (!isStrongPassword(body.next)) throw new HttpError(400, 'Password needs at least 8 characters with a letter and a number');
+    // Changing the address to one that already has an account used to reach the
+    // UNIQUE index and answer 500. Refuse it before touching the row.
+    const own = await credentialsFor(env, session.userId);
+    if (email !== normaliseEmail(own && own.email)) {
+      if (await emailTaken(env, email)) throw new HttpError(409, 'That email already has an account');
+    }
     const current = String(body.current || '');
-    const byPassword = email ? await verifyPassword(env, email, current) : null;
-    const byPin = byPassword ? null : await verifyPin(env, current);
+    // Verify against the address already on the account: the submitted one is the
+    // destination and must never be used to look up a credential. Accounts that only
+    // have a PIN (no email yet) authorise with that PIN instead.
+    const storedEmail = normaliseEmail(own && own.email);
+    const byPassword = storedEmail ? await verifyPassword(env, storedEmail, current) : null;
+    // Only this account's own PIN can authorise the change, never another member's.
+    const byPin = byPassword ? false : await verifyUserPin(env, session.userId, current);
     if (!byPassword && !byPin) throw new HttpError(401, 'Current password is incorrect');
     await setPassword(env, session.userId, email, String(body.next));
     await deleteUserSessions(env, session.userId, session.sessionId);

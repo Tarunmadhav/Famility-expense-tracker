@@ -56,7 +56,16 @@ public class MainActivity extends Activity {
         WebSettings settings = web.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
+        // Everything the app needs comes from the deployed origin over HTTPS. File and
+        // content access are switched off so a crafted page cannot read anything the
+        // app has on disk (the session cookie and cached planner data live there), and
+        // a file:// page can never navigate into the deployment's origin.
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
+        settings.setAllowFileAccessFromFileURLs(false);
+        settings.setAllowUniversalAccessFromFileURLs(false);
+        settings.setGeolocationEnabled(false);
+        settings.setSaveFormData(false);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
@@ -72,7 +81,7 @@ public class MainActivity extends Activity {
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, false);
 
-        web.addJavascriptInterface(new AndroidBridge(this), "AndroidBridge");
+        web.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -195,17 +204,55 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Exposed to JavaScript as window.AndroidBridge. */
-    static class AndroidBridge {
-        private final MainActivity activity;
+    /**
+     * True only while the WebView is showing the deployment itself. The bridge is
+     * reachable from any script that runs in that WebView, including one injected into
+     * a page opened by a link, so every call checks the current origin before doing
+     * anything. The check runs on the UI thread because getUrl is read from there.
+     */
+    private boolean onTrustedPage() {
+        // @JavascriptInterface methods arrive on a WebView bridge thread, so the URL is
+        // read on the UI thread and handed back. A timeout keeps a stuck UI thread from
+        // blocking the page that called in.
+        final String[] current = new String[1];
+        final java.util.concurrent.CountDownLatch ready = new java.util.concurrent.CountDownLatch(1);
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    current[0] = web == null ? null : web.getUrl();
+                } finally {
+                    ready.countDown();
+                }
+            }
+        });
+        try {
+            if (!ready.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) return false;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        String url = current[0];
+        if (url == null) return false;
+        Uri uri = Uri.parse(url);
+        return "https".equals(uri.getScheme()) && APP_HOST.equals(uri.getHost());
+    }
 
-        AndroidBridge(MainActivity activity) {
-            this.activity = activity;
+    /** Exposed to JavaScript as window.AndroidBridge. */
+    class AndroidBridge {
+        AndroidBridge() {
         }
 
         @JavascriptInterface
         public void notify(String title, String body) {
-            activity.postNotification(title, body);
+            if (!onTrustedPage()) return;
+            // Titles come from the page, so keep them short and single-line: the
+            // notification tray is not a place to render arbitrary HTML or noise.
+            String safeTitle = title == null ? "" : title.replaceAll("[\\p{Cntrl}]", " ").trim();
+            if (safeTitle.length() > 80) safeTitle = safeTitle.substring(0, 80);
+            String safeBody = body == null ? "" : body.replaceAll("[\\p{Cntrl}]", " ").trim();
+            if (safeBody.length() > 300) safeBody = safeBody.substring(0, 300);
+            postNotification(safeTitle, safeBody);
         }
 
         @JavascriptInterface
