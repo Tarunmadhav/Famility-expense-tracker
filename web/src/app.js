@@ -481,11 +481,51 @@ async function disableNotifications() {
 /**
  * A shell cached across a deploy names CSS and JS hashes that no longer exist, and
  * the result is an unstyled page (a wall of plain text and a giant pill where the
- * add button should be). Nothing else on the page can reveal that, so probe one
- * style from the stylesheet, then clear the two caches that can cause it and reload
- * exactly once.
+ * add button should be). Wait for the app stylesheet to load before probing, so a
+ * slow WebView/CSS load does not trigger a false self-heal loop.
  */
 async function ensureShellStyles() {
+  const waitForStyles = () =>
+    new Promise((resolve) => {
+      const hasCss = () => {
+        // In dev (Vite) styles may be injected; in prod we have a /assets/*.css link.
+        const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
+        if (!links.length) return true;
+        return links.some((l) => {
+          try {
+            return l.sheet && l.sheet.cssRules && l.sheet.cssRules.length > 0;
+          } catch {
+            return false;
+          }
+        });
+      };
+      if (hasCss()) return resolve(true);
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), 4000);
+      const check = () => {
+        if (hasCss()) {
+          clearTimeout(timer);
+          finish(true);
+        }
+      };
+      document.querySelectorAll('link[rel="stylesheet"]').forEach((l) => {
+        l.addEventListener('load', check, { once: true });
+        l.addEventListener('error', () => {}, { once: true });
+      });
+      const poll = setInterval(() => {
+        if (done) return clearInterval(poll);
+        check();
+      }, 150);
+      if (document.readyState === 'complete') check();
+      else window.addEventListener('load', check, { once: true });
+    });
+
+  const stylesReady = await waitForStyles();
   const probe = document.createElement('div');
   probe.className = 'btn';
   probe.setAttribute('aria-hidden', 'true');
@@ -493,9 +533,15 @@ async function ensureShellStyles() {
   document.body.appendChild(probe);
   const radius = getComputedStyle(probe).borderRadius || '';
   probe.remove();
+
   if (radius && radius !== '0px' && radius !== '0') {
     sessionStorage.removeItem('ffp-style-reload');
     return true;
+  }
+  if (!stylesReady && sessionStorage.getItem('ffp-style-reload') !== '1') {
+    sessionStorage.setItem('ffp-style-reload', '1');
+    location.replace(`${location.pathname}?reload=${Date.now()}`);
+    return false;
   }
   if (sessionStorage.getItem('ffp-style-reload') === '1') return true;
   sessionStorage.setItem('ffp-style-reload', '1');

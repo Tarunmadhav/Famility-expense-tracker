@@ -96,7 +96,7 @@ import {
 } from './profiles.js';
 
 /** Build/api version reported to clients; bump when the API contract changes. */
-const APP_VERSION = '2.4.1';
+const APP_VERSION = '2.4.2';
 const API_VERSION = 14;
 
 /** Content sniffing: the browser-declared type is never trusted. */
