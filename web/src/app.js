@@ -796,6 +796,22 @@ document.addEventListener('click', async (event) => {
         toast('Two-factor turned off');
       });
       return undefined;
+    case 'wa-link':
+      await guard(async () => {
+        const out = await api.whatsappLinkCode(S.profileId);
+        S.whatsappCode = out.code;
+        render();
+      });
+      return undefined;
+    case 'wa-unlink':
+      await guard(async () => {
+        await api.whatsappUnlink();
+        S.whatsappCode = '';
+        S.whatsapp = await api.whatsappState().catch(() => ({ configured: false, links: [] }));
+        render();
+        toast('This number can no longer reach the planner');
+      });
+      return undefined;
     case 'cloud-link':
       await guard(async () => {
         const out = await api.cloudLinkStart(id);
@@ -1256,6 +1272,7 @@ async function loadSettingsData() {
       api.twoFactorState().catch(() => ({ enabled: false })),
     ]);
     S.cloud = await api.cloudLinks().then((out) => out.providers || []).catch(() => []);
+    S.whatsapp = await api.whatsappState().catch(() => ({ configured: false, links: [] }));
     S.security = {
       twoFactor: Boolean(twofa.enabled),
       hasRecovery: Boolean(account && account.hasRecovery),

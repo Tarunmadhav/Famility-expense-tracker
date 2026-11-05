@@ -322,6 +322,22 @@ export function settingsView() {
       : ''}
   </div>
 
+  <div class="card"><h2>WhatsApp</h2>
+    <p class="mut" style="margin-top:0">Text the planner to read, add, change or remove anything: expenses,
+      bills, tasks, insurance, loans and contacts. A number only gets access after you link it here.</p>
+    ${S.whatsapp && S.whatsapp.configured === false
+      ? '<p class="hint mut">Ask the owner to add WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, WHATSAPP_VERIFY_TOKEN and WHATSAPP_APP_SECRET as Worker secrets, then point the Meta webhook at <code>/api/whatsapp/webhook</code>.</p>'
+      : ''}
+    ${(S.whatsapp && S.whatsapp.links ? S.whatsapp.links : []).map((l) => `<div class="mrow"><span>${esc(l.phone)}</span><b>Linked</b>
+      <span class="act"><button class="btn s r" data-act="wa-unlink">Unlink</button></span></div>`).join('')}
+    ${S.whatsappCode
+      ? `<div class="alerts">Text <b>link ${esc(S.whatsappCode)}</b> to the planner's WhatsApp number. The code works once and expires in 10 minutes.</div>`
+      : S.whatsapp && S.whatsapp.configured === false
+        ? ''
+        : '<p style="margin-top:10px"><button class="btn g" data-act="wa-link">Create link code</button></p>'}
+    <p class="hint mut">Try <code>summary</code>, <code>add expense 250 groceries</code>, <code>list bills</code>, <code>done bills 1</code>.</p>
+  </div>
+
   <div class="card"><h2>Appearance &amp; security</h2>
     <div class="row2">
       <div class="fld"><label>Theme</label><div class="seg"><button data-act="theme" data-theme="light" class="${S.theme !== 'dark' ? 'on' : ''}">Light</button><button data-act="theme" data-theme="dark" class="${S.theme === 'dark' ? 'on' : ''}">Dark</button></div></div>

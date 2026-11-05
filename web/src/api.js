@@ -64,6 +64,9 @@ export const recoverPin = (code, pin) => request('/api/auth/recover', { method: 
 export const requestOtp = (email) => request('/api/auth/otp/request', { method: 'POST', body: { email } });
 export const resetWithOtp = (email, code, password) => request('/api/auth/otp/reset', { method: 'POST', body: { email, code, password } });
 export const oauthStart = (provider) => request('/api/auth/oauth/start', { method: 'POST', body: { provider } });
+export const whatsappState = () => request('/api/whatsapp');
+export const whatsappLinkCode = (profile) => request('/api/whatsapp/link', { method: 'POST', body: { profile } });
+export const whatsappUnlink = () => request('/api/whatsapp/link', { method: 'DELETE' });
 export const renameAccount = (name) => request('/api/auth/account', { method: 'PATCH', body: { name } });
 export const twoFactorState = () => request('/api/auth/2fa');
 export const startTwoFactor = () => request('/api/auth/2fa/start', { method: 'POST' });

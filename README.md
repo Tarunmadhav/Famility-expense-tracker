@@ -310,6 +310,45 @@ Redirect URI for each: `<worker-url>/api/auth/oauth/callback/<provider>`. An exi
 account and its data; a new email creates an account in its own book. The OAuth state value is
 single-use and expires after ten minutes.
 
+### Text the planner from WhatsApp
+
+Once configured, a linked phone can read and change the planner from a chat:
+
+```
+summary                      spend this month, unpaid bills, open tasks
+list bills                   numbered list; "done 1" targets it
+add expense 250 groceries    free text picks the amount and the main field
+add task Pay electricity tomorrow
+add bill 1200 electricity due=2026-11-12
+edit bills 2 amount=1300 status=Paid
+delete tasks 4
+use personal                 switch which book the chat writes to
+unlink                       revoke this number
+```
+
+Any collection works the same way (`family`, `contacts`, `insurance`, `loans`,
+`subscriptions`, `budget`, `income`), and any field can be set with `key=value`.
+
+Setup, in the Meta developer console (WhatsApp → API setup):
+
+```bash
+npx wrangler secret put WHATSAPP_TOKEN        # permanent access token
+npx wrangler secret put WHATSAPP_PHONE_ID     # sender phone number id
+npx wrangler secret put WHATSAPP_VERIFY_TOKEN # any random string you also type in Meta
+npx wrangler secret put WHATSAPP_APP_SECRET   # App settings → Basic → App secret
+```
+
+Webhook URL: `<worker-url>/api/whatsapp/webhook`, subscribed to the `messages`
+field. Then open **Settings → WhatsApp → Create link code** and text
+`link <code>` from your phone; the code is single use and expires in 10 minutes.
+
+Security properties: every request is verified against `X-Hub-Signature-256`
+before the body is parsed, a number has no access until it is linked from a
+signed-in session, each command re-checks profile membership and role, deliveries
+are de-duplicated by message id so a Meta retry cannot double-book an expense, and
+chats are limited to 60 commands an hour. WhatsApp itself still sees the plaintext
+messages, and the phone number is metadata the provider and the Worker both hold.
+
 ## Local development
 
 ```bash
