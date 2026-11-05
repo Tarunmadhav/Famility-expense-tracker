@@ -176,6 +176,25 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        // A WebView does not reliably deliver visibilitychange for every way the app
+        // can leave the foreground (Home, recents, screen off, a system dialog), so the
+        // lock is requested from here as well. This is what makes closing the app lock
+        // it instead of relying on the inactivity timer.
+        if (web != null) {
+            web.evaluateJavascript("window.__plannerHide&&window.__plannerHide()", null);
+            web.onPause();
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (web != null) web.onResume();
+    }
+
+    @Override
     public void onBackPressed() {
         if (web != null && web.canGoBack()) web.goBack();
         else super.onBackPressed();

@@ -127,6 +127,12 @@ function setView(view, message = '') {
 /* ---------------------------------------------------------------- render */
 
 function render() {
+  // Nothing paints behind a backgrounded app; remembering that it is out of date
+  // avoids a burst of layout work on every wake-up while it is invisible.
+  if (document.hidden && S.view === 'app' && !S.locked) {
+    dirtyWhileHidden = true;
+    return;
+  }
   closeBellOnOutside();
   // Drop the static boot splash the first time we paint a real screen.
   const boot = document.getElementById('boot');
@@ -222,6 +228,7 @@ function renderSyncBadge() {
 
 async function boot() {
   registerServiceWorker();
+  if (!(await ensureShellStyles())) return;
   // The OAuth callbacks land on / with a short status flag instead of a message.
   try {
     const params = new URLSearchParams(window.location.search);
@@ -365,7 +372,10 @@ async function refresh() {
   const before = S.rev;
   applyState(payload);
   if (S.tab === 'settings') await loadSettingsData();
-  render();
+  // A wake-up with no new revision used to tear down and rebuild the whole DOM,
+  // which is what made long sessions feel like the app was freezing. Only repaint
+  // when something actually changed.
+  if (S.rev !== before || S.tab === 'settings') render();
   if (S.rev !== before) await checkPendingNotifications(false);
 }
 
@@ -468,6 +478,45 @@ async function disableNotifications() {
   render();
 }
 
+/**
+ * A shell cached across a deploy names CSS and JS hashes that no longer exist, and
+ * the result is an unstyled page (a wall of plain text and a giant pill where the
+ * add button should be). Nothing else on the page can reveal that, so probe one
+ * style from the stylesheet, then clear the two caches that can cause it and reload
+ * exactly once.
+ */
+async function ensureShellStyles() {
+  const probe = document.createElement('div');
+  probe.className = 'btn';
+  probe.setAttribute('aria-hidden', 'true');
+  probe.style.cssText = 'position:absolute;left:-9999px;top:0';
+  document.body.appendChild(probe);
+  const radius = getComputedStyle(probe).borderRadius || '';
+  probe.remove();
+  if (radius && radius !== '0px' && radius !== '0') {
+    sessionStorage.removeItem('ffp-style-reload');
+    return true;
+  }
+  if (sessionStorage.getItem('ffp-style-reload') === '1') return true;
+  sessionStorage.setItem('ffp-style-reload', '1');
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(regs.map((reg) => reg.unregister()));
+  } catch {
+    /* registrations are best effort */
+  }
+  try {
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((key) => caches.delete(key)));
+    }
+  } catch {
+    /* cache storage is best effort */
+  }
+  location.replace(`${location.pathname}?reload=${Date.now()}`);
+  return false;
+}
+
 function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   window.addEventListener('load', () => {
@@ -479,9 +528,45 @@ function registerServiceWorker() {
 
 /* ---------------------------------------------------------------- events */
 
+let hiddenAt = 0;
+let dirtyWhileHidden = false;
+
+/**
+ * Leaving the app locks the planner. Backgrounding, switching apps or swiping it
+ * away all end here, so whoever picks the phone up next gets the lock screen and
+ * no loaded data — closing the app alone used to leave it unlocked until the
+ * inactivity timer happened to expire.
+ */
+function onAppHidden() {
+  hiddenAt = Date.now();
+  if (S.view !== 'app' || S.locked) return;
+  if (!S.lockMinutes) {
+    // Auto-lock explicitly switched off: keep the data, but still drop what is on
+    // screen so the app-switcher thumbnail is not a copy of the finances.
+    S.bellOpen = false;
+    return;
+  }
+  lockNow();
+}
+
+// Called by the Android shell from onPause, which is reliable where a WebView does
+// not always deliver visibilitychange.
+window.__plannerHide = onAppHidden;
+window.addEventListener('pagehide', onAppHidden);
+
+function onAppVisible() {
+  if (S.view !== 'app' || S.locked) return;
+  if (S.lockMinutes && Date.now() - lastActive > S.lockMinutes * 60000) return lockNow();
+  if (dirtyWhileHidden) {
+    dirtyWhileHidden = false;
+    render();
+  }
+  hiddenAt = 0;
+}
+
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible' || S.view !== 'app' || S.locked) return;
-  if (S.lockMinutes && Date.now() - lastActive > S.lockMinutes * 60000) lockNow();
+  if (document.hidden) onAppHidden();
+  else onAppVisible();
 });
 
 document.addEventListener('DOMContentLoaded', () => {

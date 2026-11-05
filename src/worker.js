@@ -96,8 +96,8 @@ import {
 } from './profiles.js';
 
 /** Build/api version reported to clients; bump when the API contract changes. */
-const APP_VERSION = '2.4.0';
-const API_VERSION = 13;
+const APP_VERSION = '2.4.1';
+const API_VERSION = 14;
 
 /** Content sniffing: the browser-declared type is never trusted. */
 function sniffMime(head) {
@@ -257,7 +257,14 @@ async function serveStatic(request, env, url) {
   if (path.startsWith('/assets/')) {
     // Vite fingerprints these filenames, so they can be cached for a year.
     out.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
-  } else if (path === '/sw.js' || path.endsWith('manifest.json') || path === '/' || path === '/index.html') {
+  } else if (path === '/' || path === '/index.html') {
+    // The shell names the hashed CSS and JS of exactly one build. If a cached copy
+    // survives a deploy, those hashes 404 and the app renders with no styles at all,
+    // which is what a phone with a stale index.html was showing. Never store it:
+    // both the WebView's HTTP cache and the service worker are kept out of the loop.
+    out.headers.set('Cache-Control', 'no-store, must-revalidate');
+    out.headers.set('Pragma', 'no-cache');
+  } else if (path === '/sw.js' || path.endsWith('manifest.json')) {
     out.headers.set('Cache-Control', 'no-cache');
   }
   if (path.startsWith('/download/') && path.endsWith('.apk')) {

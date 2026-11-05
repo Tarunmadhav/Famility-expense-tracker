@@ -2,8 +2,11 @@
 
 // Bumped when the shell contract changes: activation deletes every older cache,
 // so a phone that kept the previous build cannot serve stale HTML or bundles.
-const CACHE = 'ffp-shell-v2';
-const SHELL = ['/', '/index.html', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+const CACHE = 'ffp-shell-v3';
+// Deliberately no HTML here. The shell references fingerprinted CSS/JS, so a cached
+// shell plus a newer deployment means missing assets and a completely unstyled app.
+// Static names that never change per build are safe to keep.
+const SHELL = ['/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -25,14 +28,16 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname.startsWith('/api/')) return;
 
   if (request.mode === 'navigate') {
+    // Always from the network, and never stored: serving a remembered shell is how a
+    // phone ended up pointing at asset hashes that no longer existed.
     event.respondWith(
-      fetch(request)
-        .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE).then((cache) => cache.put('/index.html', copy)).catch(() => undefined);
-          return res;
-        })
-        .catch(() => caches.match('/index.html').then((hit) => hit || Response.error())),
+      fetch(request, { cache: 'no-store' }).catch(
+        () =>
+          new Response(
+            '<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>Offline</title><body style="font:15px system-ui;padding:32px;background:#0f172a;color:#e2e8f0"><h1 style="font-size:18px">You are offline</h1><p>The planner needs a connection. Reopen the app when you are back online.</p>',
+            { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+          ),
+      ),
     );
     return;
   }
