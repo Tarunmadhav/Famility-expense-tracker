@@ -69,7 +69,10 @@ nav:not(.tabbar) button.on { color: var(--accent-ink); background: var(--accent)
 main { width: 100%; max-width: 1280px; margin: 0 auto; padding: 14px clamp(12px, 2.5vw, 24px) 90px; }
 
 /* ----------------------------------------------------------------- cards */
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 12px; box-shadow: var(--shadow); }
+/* The dashboard is one long column of cards, and the phone shell scrolls the whole
+   document. Without this the WebView rasterises every card on every frame, on and
+   off screen; `auto` keeps the last measured height so the scrollbar does not jump. */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 12px; box-shadow: var(--shadow); content-visibility: auto; contain-intrinsic-size: auto 220px; }
 .card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 650; letter-spacing: .02em; }
 .card h3 { margin: 12px 0 6px; font-size: 12px; font-weight: 650; color: var(--mute); text-transform: uppercase; letter-spacing: .06em; }
 .bar { color: var(--ink); font-weight: 600; font-size: 11px; letter-spacing: .07em; text-transform: uppercase; padding: 8px 12px; border-radius: 8px; margin: 16px 0 8px; background: var(--tint); border: 1px solid var(--line); }
