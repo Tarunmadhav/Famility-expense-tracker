@@ -308,18 +308,69 @@ export function settingsView() {
         : `<div class="tools"><button class="btn" data-act="2fa-start">Set up two-factor</button><button class="btn g" data-act="recovery-new">${security.hasRecovery ? 'New recovery code' : 'Create recovery code'}</button></div>`}
   </div>
 
-  <div class="card"><h2>Cloud backup</h2>
-    <p class="mut" style="margin-top:0">Send an encrypted copy of this profile to your own Google Drive or OneDrive.
-      The app never stores your drive password: it keeps a revocable token for the account you pick.</p>
-    ${(S.cloud || []).map((p) => `<div class="mrow"><span>${esc(p.label)}</span><b>${p.linkedAt ? `Linked ${relativetimeFrom(p.linkedAt)}` : p.configured ? 'Not linked' : 'Not configured'}</b>
-      ${p.linkedAt
-        ? `<span class="act"><button class="btn s g" data-act="cloud-upload" data-id="${esc(p.id)}">Back up now</button><button class="btn s r" data-act="cloud-unlink" data-id="${esc(p.id)}">Unlink</button></span>`
-        : p.configured
-          ? `<span class="act"><button class="btn s" data-act="cloud-link" data-id="${esc(p.id)}">Connect</button></span>`
-          : `<span class="act mut">Add credentials</span>`}</span></div>`).join('')}
-    ${(S.cloud || []).some((p) => !p.configured && !p.linkedAt)
-      ? '<p class="hint mut">A provider becomes available once the owner adds its OAuth client id and secret as Worker secrets.</p>'
+  <div class="card"><h2>Backup</h2>
+    <p class="mut" style="margin-top:0">Keep a full copy of every book you can open in <b>your own</b> Google Drive or OneDrive.
+      The file is versioned JSON with a SHA-256 checksum, and the connection keeps a revocable token for the account you pick —
+      the app never sees your drive password, and it can only reach its own private app folder.</p>
+    ${(S.cloud || []).map((p) => {
+      const runs = (S.backupRuns || []).filter((r) => r.provider === p.id);
+      const files = (S.backupFiles || {})[p.id] || null;
+      return `<div class="mrow"><span><b>${esc(p.label)}</b><br>
+        <span class="mut">${p.linkedAt ? `Connected ${relativetimeFrom(p.linkedAt)}` : p.configured ? 'Not connected' : 'Not configured'}</span></span>
+        <b>${p.lastBackupAt ? `Last backup ${relativetimeFrom(p.lastBackupAt)}` : p.configured ? (p.linkedAt ? 'No backup yet' : '—') : 'Owner must add credentials'}</b>
+        <span class="act">
+          ${p.linkedAt
+            ? `<button class="btn s" data-act="cloud-upload" data-id="${esc(p.id)}">Back up now</button>
+               <button class="btn s g" data-act="cloud-list" data-id="${esc(p.id)}">Restore…</button>
+               <button class="btn s r" data-act="cloud-unlink" data-id="${esc(p.id)}">Disconnect</button>`
+            : p.configured
+              ? `<button class="btn s" data-act="cloud-link" data-id="${esc(p.id)}">Connect</button>`
+              : `<span class="mut" style="font-size:12px">${p.id === 'google' ? 'GOOGLE_CLIENT_ID' : 'MICROSOFT_CLIENT_ID'}</span>`}
+        </span>
+      </div>
+      ${files
+        ? `<div class="tw" style="margin:6px 0 10px"><table><thead><tr><th>Backup</th><th>Size</th><th>Made</th><th></th></tr></thead><tbody>
+            ${files.length
+              ? files.map((f) => `<tr><td>${esc(f.name)}</td><td class="mut">${f.bytes ? `${Math.round(f.bytes / 1024)} KB` : '—'}</td>
+                  <td class="mut">${f.createdAt ? relativetimeFrom(f.createdAt) : '—'}</td>
+                  <td class="act"><button class="btn s g" data-act="cloud-restore" data-provider="${esc(p.id)}" data-file="${esc(f.id)}" data-name="${esc(f.name)}">Restore</button></td></tr>`).join('')
+              : '<tr><td colspan="4" class="mut">No backups in that drive yet.</td></tr>'}
+          </tbody></table></div>`
+        : ''}
+      ${runs.length
+        ? `<p class="hint mut">Recent runs: ${runs.slice(0, 3).map((r) => `${esc(r.trigger)} ${relativetimeFrom(r.created_at)}`).join(' · ')}</p>`
+        : ''}`;
+    }).join('')}
+    ${(S.cloud || []).some((p) => !p.configured)
+      ? `<p class="hint mut">A provider becomes available once the owner adds its OAuth client id and secret as Worker secrets.
+          Both providers also need a <code>BACKUP_KEY</code> secret so a refresh token can be stored encrypted.</p>`
       : ''}
+    ${S.backupKeyConfigured === false
+      ? '<p class="hint mut"><b>BACKUP_KEY is not set</b>, so a drive cannot be connected: without it the refresh token could not be stored encrypted.</p>'
+      : ''}
+
+    <h3 style="margin:16px 0 6px;font-size:15px">Automatic backup</h3>
+    <div class="mrow"><span>Schedule</span>
+      <b>${S.cloudState && S.cloudState.enabled ? `${esc(S.cloudState.frequency)} · keep ${Number(S.cloudState.keep) || 7}` : 'Off'}</b>
+      <span class="act"></span>
+    </div>
+    <div class="tools" style="gap:8px;flex-wrap:wrap;align-items:center">
+      <label class="mut" style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="backup_on" ${S.cloudState && S.cloudState.enabled ? 'checked' : ''}> On
+      </label>
+      <select id="backup_provider" style="max-width:180px">
+        ${(S.cloud || []).filter((p) => p.linkedAt).map((p) => `<option value="${esc(p.id)}" ${S.cloudState && S.cloudState.provider === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('') || '<option value="">Connect a drive first</option>'}
+      </select>
+      <select id="backup_freq" style="max-width:130px">
+        <option value="daily" ${S.cloudState && S.cloudState.frequency === 'daily' ? 'selected' : ''}>Daily</option>
+        <option value="weekly" ${S.cloudState && S.cloudState.frequency === 'weekly' ? 'selected' : ''}>Weekly</option>
+      </select>
+      <label class="mut" style="display:flex;align-items:center;gap:6px">Keep
+        <input id="backup_keep" type="number" min="1" max="60" value="${Number(S.cloudState && S.cloudState.keep) || 7}" style="width:70px">
+      </label>
+      <button class="btn s" data-act="backup-save">Save</button>
+    </div>
+    <p class="hint mut">Automatic backup is off unless you turn it on. When it runs, the oldest backups beyond the number you keep are deleted from the app folder.</p>
   </div>
 
   <div class="card"><h2>WhatsApp</h2>

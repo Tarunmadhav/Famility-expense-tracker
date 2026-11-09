@@ -1,45 +1,52 @@
-// Google Drive / OneDrive backup connector.
+// Google Drive and OneDrive connectors.
 //
-// The app cannot ship OAuth client secrets, so the owner supplies them as Worker
-// secrets. Until both a client id and secret exist for a provider the endpoints
-// answer 501 with a plain explanation and the UI shows "not configured" instead
-// of a dead button. Tokens are encrypted with the same key as record fields and
-// never returned to the browser.
+// Both providers are wired for the narrowest scope that still allows a private
+// file: Google's `drive.appdata` (an app folder the user cannot even see in the
+// Drive UI) and Microsoft's `Files.ReadWrite.AppFolder`. The app never asks for
+// access to the rest of the drive, so a stolen token cannot read anything else.
+//
+// A connection is: PKCE + state against the provider, a refresh token sealed by
+// src/backupcrypto.js before it reaches D1, and a short-lived access token that is
+// refreshed on demand. Credentials are Worker secrets; without them the endpoints
+// answer 501 and the UI shows the provider as not configured instead of a button
+// that cannot work.
 
 import { HttpError } from './errors.js';
+import { openToken, sealToken } from './backupcrypto.js';
 import { b64url, getMeta, setMeta } from './store.js';
 
-const PROVIDERS = {
+export const CLOUD_PROVIDERS = {
   google: {
     label: 'Google Drive',
     authorize: 'https://accounts.google.com/o/oauth2/v2/auth',
     token: 'https://oauth2.googleapis.com/token',
-    scope: 'https://www.googleapis.com/auth/drive.file',
-    upload: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+    scope: 'openid email https://www.googleapis.com/auth/drive.appdata',
     clientIdKey: 'GOOGLE_CLIENT_ID',
     clientSecretKey: 'GOOGLE_CLIENT_SECRET',
+    extraAuthorize: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
   },
   onedrive: {
     label: 'OneDrive',
     authorize: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
     token: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
     scope: 'offline_access Files.ReadWrite.AppFolder',
-    upload: 'https://graph.microsoft.com/v1.0/me/drive/special/approot:/backup.json:/content',
-    clientIdKey: 'ONEDRIVE_CLIENT_ID',
-    clientSecretKey: 'ONEDRIVE_CLIENT_SECRET',
+    clientIdKey: 'MICROSOFT_CLIENT_ID',
+    clientSecretKey: 'MICROSOFT_CLIENT_SECRET',
+    extraAuthorize: {},
   },
 };
 
 export function providerInfo(env) {
-  return Object.entries(PROVIDERS).map(([id, p]) => ({
+  return Object.entries(CLOUD_PROVIDERS).map(([id, p]) => ({
     id,
     label: p.label,
     configured: Boolean(env[p.clientIdKey] && env[p.clientSecretKey]),
+    scope: p.scope,
   }));
 }
 
-function providerOf(env, id) {
-  const provider = PROVIDERS[String(id || '')];
+export function cloudProviderOf(env, id) {
+  const provider = CLOUD_PROVIDERS[String(id || '')];
   if (!provider) throw new HttpError(404, 'Unknown backup provider');
   if (!env[provider.clientIdKey] || !env[provider.clientSecretKey]) {
     throw new HttpError(
@@ -50,14 +57,14 @@ function providerOf(env, id) {
   return provider;
 }
 
-/** PKCE verifier + challenge, and the opaque state that ties a callback to a user. */
+/** Step 1: PKCE verifier + state, tied to the signed-in account. */
 export async function startConnect(env, providerId, userId, redirectUri) {
-  const provider = providerOf(env, providerId);
+  const provider = cloudProviderOf(env, providerId);
   const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
   const challenge = b64url(new Uint8Array(digest));
   const state = b64url(crypto.getRandomValues(new Uint8Array(24)));
-  await setMeta(env, `oauth:${state}`, {
+  await setMeta(env, `cloudstate:${state}`, {
     provider: providerId,
     userId,
     verifier,
@@ -72,91 +79,169 @@ export async function startConnect(env, providerId, userId, redirectUri) {
   url.searchParams.set('state', state);
   url.searchParams.set('code_challenge', challenge);
   url.searchParams.set('code_challenge_method', 'S256');
-  if (providerId === 'google') {
-    url.searchParams.set('access_type', 'offline');
-    url.searchParams.set('prompt', 'consent');
+  for (const [key, value] of Object.entries(provider.extraAuthorize || {})) {
+    url.searchParams.set(key, value);
   }
   return { url: url.toString(), state };
 }
 
-export async function finishConnect(env, providerId, code, state) {
-  const pending = await getMeta(env, `oauth:${state}`, null);
-  if (!pending || pending.provider !== providerId) throw new HttpError(400, 'That sign-in link has expired');
-  // A state older than ten minutes is not honoured.
-  if (!pending.at || Date.now() - pending.at > 600_000) throw new HttpError(400, 'That sign-in link has expired');
-  const provider = providerOf(env, providerId);
+/** Step 2: exchange the code, seal the refresh token, drop the state. */
+export async function finishConnect(env, providerId, code, state, fetchImpl = fetch) {
+  const pending = await getMeta(env, `cloudstate:${state}`, null);
+  if (!pending || pending.provider !== providerId) throw new HttpError(400, 'That connection link has expired');
+  if (!pending.at || Date.now() - pending.at > 600_000) throw new HttpError(400, 'That connection link has expired');
+  const provider = cloudProviderOf(env, providerId);
   const body = new URLSearchParams({
     client_id: env[provider.clientIdKey],
     client_secret: env[provider.clientSecretKey],
     grant_type: 'authorization_code',
-    code: String(code),
+    code: String(code || ''),
     redirect_uri: pending.redirectUri,
     code_verifier: pending.verifier,
   });
-  const res = await fetch(provider.token, {
+  const res = await fetchImpl(provider.token, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: body.toString(),
   });
   const data = await res.json().catch(() => null);
-  if (!res.ok || !data || !data.access_token) {
-    throw new HttpError(400, 'The provider did not accept the sign-in');
+  if (!res.ok || !data || !data.access_token) throw new HttpError(400, 'The provider did not accept the connection');
+  if (!data.refresh_token) {
+    throw new HttpError(400, 'The provider did not return a refresh token. Remove the app from the provider account and connect again.');
   }
-  await setMeta(env, `oauth:${state}`, null);
+  await setMeta(env, `cloudstate:${state}`, null);
   return {
     userId: pending.userId,
     provider: providerId,
-    refreshToken: data.refresh_token || '',
+    sealedRefresh: await sealToken(env, data.refresh_token),
     accessToken: data.access_token,
     expiresAt: Date.now() + (Number(data.expires_in) || 3600) * 1000,
   };
 }
 
-async function accessToken(env, saved) {
-  if (saved.accessToken && saved.expiresAt && saved.expiresAt > Date.now() + 60_000) return saved.accessToken;
-  if (!saved.refreshToken) throw new HttpError(401, 'Reconnect your drive');
-  const provider = providerOf(env, saved.provider);
+async function accessToken(env, saved, fetchImpl) {
+  if (saved.accessToken && saved.expiresAt && Number(saved.expiresAt) > Date.now() + 60_000) {
+    return saved.accessToken;
+  }
+  if (!saved.sealedRefresh) throw new HttpError(400, 'Reconnect that drive: no refresh token was stored.');
+  const provider = cloudProviderOf(env, saved.provider);
+  const refresh = await openToken(env, saved.sealedRefresh);
   const body = new URLSearchParams({
     client_id: env[provider.clientIdKey],
     client_secret: env[provider.clientSecretKey],
     grant_type: 'refresh_token',
-    refresh_token: saved.refreshToken,
+    refresh_token: refresh,
   });
-  const res = await fetch(provider.token, {
+  const res = await fetchImpl(provider.token, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: body.toString(),
   });
   const data = await res.json().catch(() => null);
-  if (!res.ok || !data || !data.access_token) throw new HttpError(401, 'Reconnect your drive');
+  if (!res.ok || !data || !data.access_token) {
+    throw new HttpError(401, 'The drive connection expired. Reconnect it in Settings.');
+  }
   return data.access_token;
 }
 
-/**
- * Upload a JSON backup. Google uses multipart metadata+content, OneDrive takes a
- * plain PUT to the app folder.
- */
-export async function uploadBackup(env, saved, filename, payload) {
-  const provider = providerOf(env, saved.provider);
-  const token = await accessToken(env, saved);
-  const json = JSON.stringify(payload);
+const DRIVE_API = 'https://www.googleapis.com/drive/v3';
+const GRAPH_API = 'https://graph.microsoft.com/v1.0/me/drive';
+
+/** Upload one JSON file into the provider's private app folder. */
+export async function uploadBackup(env, saved, filename, text, fetchImpl = fetch) {
+  const provider = cloudProviderOf(env, saved.provider);
+  const token = await accessToken(env, saved, fetchImpl);
   if (saved.provider === 'google') {
-    const form = new FormData();
-    form.append('metadata', new Blob([JSON.stringify({ name: filename, mimeType: 'application/json' })], { type: 'application/json' }));
-    form.append('file', new Blob([json], { type: 'application/json' }));
-    const res = await fetch(provider.upload, {
+    // Drive's multipart upload is multipart/related, which FormData cannot produce.
+    const boundary = `ffp${b64url(crypto.getRandomValues(new Uint8Array(9)))}`;
+    const meta = JSON.stringify({ name: filename, mimeType: 'application/json', parents: ['appDataFolder'] });
+    const body =
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n` +
+      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${text}\r\n` +
+      `--${boundary}--`;
+    const res = await fetchImpl(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size',
+      {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: form,
-    });
-    if (!res.ok) throw new HttpError(502, 'Google Drive rejected the upload');
-    return { ok: true, provider: 'google' };
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': `multipart/related; boundary=${boundary}`,
+        },
+        body,
+      },
+    );
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data) throw new HttpError(502, 'Google Drive rejected the upload');
+    return { ok: true, provider: 'google', id: data.id || '', filename };
   }
-  const res = await fetch(provider.upload.replace('/backup.json', `/${filename}`), {
+  const url = `${GRAPH_API}/special/approot:/${encodeURIComponent(filename)}:/content`;
+  const res = await fetchImpl(url, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: json,
+    body: text,
   });
-  if (!res.ok) throw new HttpError(502, 'OneDrive rejected the upload');
-  return { ok: true, provider: 'onedrive' };
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data) throw new HttpError(502, 'OneDrive rejected the upload');
+  return { ok: true, provider: 'onedrive', id: data.id || '', filename };
+}
+
+/** The backups currently in the app folder, newest first. */
+export async function listBackups(env, saved, fetchImpl = fetch) {
+  const provider = cloudProviderOf(env, saved.provider);
+  const token = await accessToken(env, saved, fetchImpl);
+  if (saved.provider === 'google') {
+    const query = encodeURIComponent("name contains 'family-planner-' and trashed = false");
+    const res = await fetchImpl(
+      `${DRIVE_API}/files?spaces=appdata&q=${query}&fields=files(id,name,createdTime,size)&orderBy=createdTime desc&pageSize=50`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data) throw new HttpError(502, 'Google Drive could not be listed');
+    return (data.files || []).map((f) => ({
+      id: f.id,
+      name: f.name,
+      createdAt: Date.parse(f.createdTime) || 0,
+      bytes: Number(f.size) || 0,
+    }));
+  }
+  const res = await fetchImpl(
+    `${GRAPH_API}/special/approot/children?$select=id,name,createdDateTime,size&$top=99`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data) throw new HttpError(502, 'OneDrive could not be listed');
+  return (data.value || [])
+    .filter((f) => String(f.name || '').startsWith('family-planner-'))
+    .map((f) => ({
+      id: f.id,
+      name: f.name,
+      createdAt: Date.parse(f.createdDateTime) || 0,
+      bytes: Number(f.size) || 0,
+    }))
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export async function downloadBackup(env, saved, fileId, fetchImpl = fetch) {
+  const provider = cloudProviderOf(env, saved.provider);
+  const token = await accessToken(env, saved, fetchImpl);
+  const url =
+    saved.provider === 'google'
+      ? `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`
+      : `${GRAPH_API}/items/${encodeURIComponent(fileId)}/content`;
+  const res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new HttpError(502, 'That backup could not be downloaded');
+  return res.text();
+}
+
+export async function deleteBackup(env, saved, fileId, fetchImpl = fetch) {
+  const provider = cloudProviderOf(env, saved.provider);
+  const token = await accessToken(env, saved, fetchImpl);
+  const url =
+    saved.provider === 'google'
+      ? `${DRIVE_API}/files/${encodeURIComponent(fileId)}`
+      : `${GRAPH_API}/items/${encodeURIComponent(fileId)}`;
+  const res = await fetchImpl(url, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+  // 404 means it is already gone, which is the outcome the caller wanted.
+  if (!res.ok && res.status !== 404) throw new HttpError(502, 'That backup could not be removed');
+  return { ok: true };
 }

@@ -25,5 +25,11 @@
   ],
   "observability": {
     "enabled": true
+  },
+  // Automatic backup (docs/BACKUP.md). The trigger exists so the feature can run;
+  // whether an account is backed up is a per-account switch that defaults to off,
+  // so this costs one scheduled invocation a day that usually does nothing.
+  "triggers": {
+    "crons": ["17 2 * * *"]
   }
 }

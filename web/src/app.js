@@ -975,15 +975,58 @@ document.addEventListener('click', async (event) => {
       return undefined;
     case 'cloud-upload':
       await guard(async () => {
-        const out = await api.cloudBackup(id, {
-          exportedAt: new Date().toISOString(),
-          profile: S.profile,
-          settings: S.settings,
-          data: S.db,
-        });
-        toast(`Backed up to ${id === 'google' ? 'Google Drive' : 'OneDrive'} (${out.filename})`);
-      });
+        const out = await api.cloudBackupNow(id);
+        await loadSettingsData();
+        render();
+        toast(`Backed up ${out.records} records (${out.filename})`);
+      }, 'The backup did not complete');
       return undefined;
+    case 'backup-save':
+      await guard(async () => {
+        const provider = document.getElementById('backup_provider').value || null;
+        const enabled = Boolean(document.getElementById('backup_on').checked);
+        const frequency = document.getElementById('backup_freq').value;
+        const keep = Number(document.getElementById('backup_keep').value) || 7;
+        await api.cloudSaveSettings({ provider, enabled, frequency, keep });
+        await loadSettingsData();
+        render();
+        toast(enabled ? `Automatic backup on (${frequency}, keeping ${keep})` : 'Automatic backup off');
+      }, 'Could not save the schedule');
+      return undefined;
+    case 'cloud-list':
+      await guard(async () => {
+        const out = await api.cloudBackups(id);
+        S.backupFiles = { ...(S.backupFiles || {}), [id]: out.files || [] };
+        S.backupFilesFor = id;
+        render();
+      }, 'Could not read the drive');
+      return undefined;
+    case 'cloud-restore': {
+      const provider = String(target.dataset.provider || S.backupFilesFor || '');
+      const fileId = String(target.dataset.file || '');
+      const name = String(target.dataset.name || 'this backup');
+      if (!fileId) return undefined;
+      if (
+        !confirm(
+          `Restore ${name}?\n\nRecords in the backup are merged by id: matching rows are replaced, everything else is left alone. This cannot be undone, so take a backup first if you are unsure.`,
+        )
+      ) {
+        return undefined;
+      }
+      await guard(async () => {
+        const out = await api.cloudRestore(provider, fileId);
+        await loadSettingsData();
+        // A restore writes rows the client has never seen, so take a full copy
+        // instead of merging deltas from the old revision.
+        const payload = await api.getState(0);
+        S.db = emptyDb();
+        S.rev = 0;
+        applyState(payload);
+        render();
+        toast(`Restored ${out.records} records`);
+      }, 'The restore did not complete');
+      return undefined;
+    }
     case 'recovery-new':
       await guard(async () => {
         const out = await api.newRecoveryCode();
@@ -1445,7 +1488,11 @@ async function loadSettingsData() {
       api.auditLog(40).catch(() => ({ events: [] })),
       api.twoFactorState().catch(() => ({ enabled: false })),
     ]);
-    S.cloud = await api.cloudLinks().then((out) => out.providers || []).catch(() => []);
+    const cloud = await api.cloudLinks().catch(() => ({}));
+    S.cloud = cloud.providers || [];
+    S.cloudState = cloud.settings || { enabled: false, frequency: 'daily', keep: 7, provider: null };
+    S.backupRuns = cloud.runs || [];
+    S.backupKeyConfigured = Boolean(cloud.keyConfigured);
     S.whatsapp = await api.whatsappState().catch(() => ({ configured: false, links: [] }));
     S.security = {
       twoFactor: Boolean(twofa.enabled),

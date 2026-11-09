@@ -76,7 +76,13 @@ export const newRecoveryCode = () => request('/api/auth/recovery', { method: 'PO
 export const cloudLinks = () => request('/api/cloud');
 export const cloudLinkStart = (provider) => request('/api/cloud/link', { method: 'POST', body: { provider } });
 export const cloudUnlink = (provider) => request('/api/cloud/unlink', { method: 'POST', body: { provider } });
-export const cloudBackup = (provider, data) => request('/api/cloud/backup', { method: 'POST', body: { provider, data } });
+export const cloudBackupNow = (provider) => request('/api/cloud/backup', { method: 'POST', body: { provider } });
+export const cloudBackups = (provider) =>
+  request(`/api/cloud/backups?provider=${encodeURIComponent(provider)}`);
+export const cloudRestore = (provider, fileId) =>
+  request('/api/cloud/restore', { method: 'POST', body: { provider, fileId } });
+export const cloudSaveSettings = (settings) =>
+  request('/api/cloud/settings', { method: 'POST', body: settings });
 export const lockSession = () => request('/api/auth/lock', { method: 'POST' });
 export const verifySecret = (payload) => request('/api/auth/verify', { method: 'POST', body: payload });
 export const setPassword = (current, next, email) => request('/api/auth/password', { method: 'POST', body: { current, next, email } });

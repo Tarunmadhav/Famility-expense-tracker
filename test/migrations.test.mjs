@@ -64,6 +64,37 @@ test('unique email and role checks are enforced by the database', async () => {
   assert.throws(() => db.prepare(`UPDATE users SET role = 'root' WHERE id = 'u1'`).run(), /users.role must be/);
 });
 
+test('every column the API reads exists after a fresh install', async () => {
+  const { db } = await freshDatabase();
+  // A baseline that forgets a column is invisible until the route that needs it
+  // is called (this is how `changes.actor` broke /api/activity once).
+  const required = {
+    users: ['id', 'name', 'pin_hash', 'pin_salt', 'iterations', 'created_at', 'role', 'household', 'recovery_hash', 'recovery_salt', 'totp_secret', 'totp_enabled', 'totp_last_step', 'updated_at'],
+    credentials: ['user_id', 'email', 'password_hash', 'password_salt', 'iterations', 'created_at'],
+    sessions: ['id', 'user_id', 'created_at', 'expires_at', 'ua', 'ip'],
+    records: ['space', 'collection', 'id', 'doc', 'rev', 'updated_at', 'updated_by'],
+    changes: ['seq', 'space', 'collection', 'record_id', 'op', 'actor', 'ts'],
+    notifications: ['id', 'space', 'type', 'title', 'body', 'level', 'collection', 'record_id', 'created_at', 'read_at', 'dedupe'],
+    files: ['id', 'space', 'name', 'mime', 'size', 'key', 'collection', 'record_id', 'uploaded_by', 'created_at'],
+    profiles: ['id', 'kind', 'name', 'owner_id', 'created_at'],
+    profile_members: ['profile_id', 'user_id', 'role', 'created_at'],
+    oauth_links: ['provider', 'provider_id', 'user_id', 'email', 'created_at'],
+    cloud_links: ['user_id', 'provider', 'refresh_token', 'access_token', 'expires_at', 'created_at', 'last_backup_at'],
+    backup_settings: ['user_id', 'provider', 'enabled', 'frequency', 'keep', 'last_run_at', 'updated_at'],
+    backup_runs: ['id', 'user_id', 'provider', 'filename', 'sha256', 'bytes', 'created_at', 'trigger'],
+    audit_log: ['id', 'ts', 'actor', 'profile_id', 'action', 'target', 'detail'],
+    ai_connections: ['id', 'provider', 'base_url', 'model', 'api_key', 'created_by', 'created_at', 'profile_id'],
+    push_subs: ['id', 'endpoint', 'p256dh', 'auth', 'created_at', 'ua', 'user_id'],
+    whatsapp_links: ['phone', 'user_id', 'profile', 'created_at'],
+  };
+  for (const [table, columns] of Object.entries(required)) {
+    const present = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    for (const column of columns) {
+      assert.ok(present.includes(column), `${table}.${column} is missing`);
+    }
+  }
+});
+
 test('the query indexes the API depends on exist', async () => {
   const { db } = await freshDatabase();
   const names = db

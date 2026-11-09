@@ -79,7 +79,9 @@ import {
 import { removeSubscription, saveSubscription, sendTestPush } from './push.js';
 import { scanReceipt, testConnection } from './ai.js';
 import { encryptionReady } from './fieldcrypto.js';
-import { providerInfo, startConnect, finishConnect, uploadBackup } from './cloud.js';
+import { downloadBackup, finishConnect, listBackups, providerInfo, startConnect } from './cloud.js';
+import { backupKeyConfigured } from './backupcrypto.js';
+import { CLOUD_PROVIDER_IDS, cloudLink, restoreExport, runBackup, runScheduledBackups } from './backup.js';
 import { emailConfigured, sendOtpEmail } from './email.js';
 import { handleMessage, parseWebhook, sendWhatsapp, verifySignature, whatsappConfigured } from './whatsapp.js';
 import {
@@ -145,6 +147,16 @@ const SNAPSHOT_TABLES = [
 const SNAPSHOT_PAGE = 500;
 
 export default {
+  /** Cron Trigger: only accounts with automatic backup on are touched. */
+  async scheduled(event, env, ctx) {
+    if (!env.DB) return;
+    ctx.waitUntil(
+      runScheduledBackups(env, { now: event && event.scheduledTime ? event.scheduledTime : Date.now() }).catch((err) =>
+        console.error('scheduled backup run failed', err && err.message),
+      ),
+    );
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     // workers.dev terminates TLS, but a custom domain or a proxy in front could
@@ -1104,21 +1116,75 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true });
   }
 
-  /* ------------------------------------------------ cloud backup links */
+  /* -------------------------------------------------- cloud backup */
+  // The token that keeps a drive connected never leaves the Worker: the response
+  // says whether a provider is configured and linked, never how.
 
   if (path === '/api/cloud' && method === 'GET') {
     const rows = (await env.DB.prepare(
-      `SELECT provider, created_at FROM cloud_links WHERE user_id = ?`,
+      `SELECT provider, created_at, last_backup_at FROM cloud_links WHERE user_id = ?`,
     )
       .bind(session.userId)
       .all()).results || [];
-    const linked = Object.fromEntries(rows.map((r) => [r.provider, r.created_at]));
+    const linked = Object.fromEntries(rows.map((r) => [r.provider, r]));
+    const settings = (await env.DB.prepare(
+      `SELECT provider, enabled, frequency, keep, last_run_at FROM backup_settings WHERE user_id = ?`,
+    )
+      .bind(session.userId)
+      .first()) || { provider: null, enabled: 0, frequency: 'daily', keep: 7, last_run_at: null };
+    const runs = (await env.DB.prepare(
+      `SELECT provider, filename, sha256, bytes, created_at, trigger FROM backup_runs
+        WHERE user_id = ? ORDER BY created_at DESC LIMIT 10`,
+    )
+      .bind(session.userId)
+      .all()).results || [];
     return json({
-      providers: providerInfo(env).map((p) => ({ ...p, linkedAt: linked[p.id] || null })),
+      providers: providerInfo(env).map((p) => ({
+        ...p,
+        linkedAt: linked[p.id] ? linked[p.id].created_at : null,
+        lastBackupAt: linked[p.id] ? linked[p.id].last_backup_at : null,
+      })),
+      settings: {
+        provider: settings.provider || null,
+        enabled: Boolean(settings.enabled),
+        frequency: settings.frequency || 'daily',
+        keep: Number(settings.keep) || 7,
+        lastRunAt: settings.last_run_at || null,
+      },
+      runs,
+      keyConfigured: backupKeyConfigured(env),
     });
   }
 
+  if (path === '/api/cloud/settings' && method === 'POST') {
+    const body = await readJson(request);
+    const frequency = ['daily', 'weekly'].includes(String(body.frequency)) ? String(body.frequency) : 'daily';
+    const keep = Math.min(60, Math.max(1, Number(body.keep) || 7));
+    const enabled = body.enabled ? 1 : 0;
+    const provider = body.provider ? String(body.provider) : null;
+    if (provider && !CLOUD_PROVIDER_IDS.has(provider)) throw new HttpError(400, 'Unknown backup provider');
+    if (enabled) {
+      const saved = await env.DB.prepare(`SELECT 1 AS ok FROM cloud_links WHERE user_id = ? AND provider = ?`)
+        .bind(session.userId, provider || '')
+        .first();
+      if (!saved) throw new HttpError(400, 'Connect that drive before turning automatic backup on');
+      if (!backupKeyConfigured(env)) throw new HttpError(501, 'BACKUP_KEY is not set, so tokens cannot be stored safely');
+    }
+    await env.DB.prepare(
+      `INSERT INTO backup_settings (user_id, provider, enabled, frequency, keep, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET provider = excluded.provider, enabled = excluded.enabled,
+         frequency = excluded.frequency, keep = excluded.keep, updated_at = excluded.updated_at`,
+    )
+      .bind(session.userId, provider, enabled, frequency, keep, Date.now())
+      .run();
+    return json({ ok: true, settings: { provider, enabled: Boolean(enabled), frequency, keep } });
+  }
+
   if (path === '/api/cloud/link' && method === 'POST') {
+    if (!backupKeyConfigured(env)) {
+      throw new HttpError(501, 'BACKUP_KEY is not set on this deployment, so a drive connection cannot be stored safely.');
+    }
     const body = await readJson(request);
     const provider = String(body.provider || '');
     const redirectUri = `${url.origin}/api/cloud/callback/${provider}`;
@@ -1128,63 +1194,105 @@ async function handleApi(request, env, ctx, url) {
 
   if (path === '/api/cloud/unlink' && method === 'POST') {
     const body = await readJson(request);
+    const provider = String(body.provider || '');
     await env.DB.prepare(`DELETE FROM cloud_links WHERE user_id = ? AND provider = ?`)
-      .bind(session.userId, String(body.provider || ''))
+      .bind(session.userId, provider)
       .run();
+    await env.DB.prepare(`UPDATE backup_settings SET enabled = 0 WHERE user_id = ? AND provider = ?`)
+      .bind(session.userId, provider)
+      .run();
+    await audit(env, { action: 'backup.unlink', actor: session.userId, target: provider });
     return json({ ok: true });
   }
 
   const cloudCallback = path.match(/^\/api\/cloud\/callback\/([a-z]{1,20})$/);
   if (cloudCallback && method === 'GET') {
     const provider = cloudCallback[1];
-    const error = url.searchParams.get('error');
-    const back = new URL('/settings?cloud=', url.origin);
-    if (error) {
+    const back = new URL('/settings', url.origin);
+    if (url.searchParams.get('error')) {
       back.searchParams.set('cloud', 'denied');
-      return Response.redirect(back.toString(), 302);
+      return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
     }
     try {
       const linked = await finishConnect(env, provider, url.searchParams.get('code'), url.searchParams.get('state'));
+      // A state belongs to the account that asked for it; a callback carrying
+      // another account's state must never write a connection onto this session.
+      if (linked.userId !== session.userId) throw new HttpError(400, 'That connection belongs to another account');
       await env.DB.prepare(
         `INSERT INTO cloud_links (user_id, provider, refresh_token, access_token, expires_at, created_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(user_id, provider) DO UPDATE SET refresh_token = excluded.refresh_token,
            access_token = excluded.access_token, expires_at = excluded.expires_at`,
       )
-        .bind(linked.userId, linked.provider, linked.refreshToken, linked.accessToken, linked.expiresAt, Date.now())
+        .bind(linked.userId, linked.provider, linked.sealedRefresh, linked.accessToken, linked.expiresAt, Date.now())
         .run();
+      await audit(env, { action: 'backup.link', actor: session.userId, target: provider });
       back.searchParams.set('cloud', 'connected');
-    } catch {
+    } catch (err) {
+      console.error('cloud connect failed', provider, err && err.message);
       back.searchParams.set('cloud', 'failed');
     }
-    return Response.redirect(back.toString(), 302);
+    return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
   }
 
   if (path === '/api/cloud/backup' && method === 'POST') {
+    if (!backupKeyConfigured(env)) throw new HttpError(501, 'BACKUP_KEY is not set on this deployment.');
     const body = await readJson(request);
     const provider = String(body.provider || '');
-    const saved = await env.DB.prepare(
-      `SELECT provider, refresh_token, access_token, expires_at FROM cloud_links WHERE user_id = ? AND provider = ?`,
-    )
-      .bind(session.userId, provider)
-      .first();
+    const out = await runBackup(env, { userId: session.userId, provider, trigger: 'manual', appVersion: APP_VERSION });
+    await audit(env, { action: 'backup.create', actor: session.userId, target: provider, detail: out.filename });
+    return json(out);
+  }
+
+  if (path === '/api/cloud/backups' && method === 'GET') {
+    const provider = String(url.searchParams.get('provider') || '');
+    const saved = await cloudLink(env, session.userId, provider);
     if (!saved) throw new HttpError(400, 'Connect that drive first');
-    const data = body.data && typeof body.data === 'object' ? body.data : null;
-    if (!data) throw new HttpError(400, 'Nothing to upload');
-    const filename = `family-planner-${new Date().toISOString().slice(0, 10)}.json`;
-    const out = await uploadBackup(
-      env,
-      {
-        provider,
-        refreshToken: saved.refresh_token,
-        accessToken: saved.access_token,
-        expiresAt: saved.expires_at,
-      },
-      filename,
-      data,
-    );
-    await audit(env, { action: 'backup.create', actor: session.userId, profileId: space, target: provider });
-    return json({ ...out, filename });
+    const files = await listBackups(env, saved);
+    return json({ provider, files: files.slice(0, 30) });
+  }
+
+  if (path === '/api/cloud/restore' && method === 'POST') {
+    const body = await readJson(request);
+    const provider = String(body.provider || '');
+    let payload = body.payload && typeof body.payload === 'object' ? body.payload : null;
+    if (!payload) {
+      if (!backupKeyConfigured(env)) throw new HttpError(501, 'BACKUP_KEY is not set on this deployment.');
+      const fileId = String(body.fileId || '');
+      if (!fileId) throw new HttpError(400, 'Choose a backup to restore');
+      const saved = await cloudLink(env, session.userId, provider);
+      if (!saved) throw new HttpError(400, 'Connect that drive first');
+      const text = await downloadBackup(env, saved, fileId);
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        throw new HttpError(400, 'That backup is not valid JSON');
+      }
+    }
+    const stats = await restoreExport(env, session.userId, payload);
+    if (provider) {
+      await env.DB.prepare(
+        `INSERT INTO backup_runs (id, user_id, provider, filename, sha256, bytes, created_at, trigger)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'restore')`,
+      )
+        .bind(
+          crypto.randomUUID(),
+          session.userId,
+          provider,
+          String(payload.createdAt || ''),
+          String((payload.checksum && payload.checksum.value) || ''),
+          0,
+          Date.now(),
+        )
+        .run();
+    }
+    await audit(env, {
+      action: 'backup.restore',
+      actor: session.userId,
+      target: provider || 'upload',
+      detail: `${stats.records} records`,
+    });
+    return json({ ok: true, ...stats });
   }
 
   if (path === '/api/auth/sessions' && method === 'GET') {
