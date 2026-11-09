@@ -63,11 +63,12 @@ bottom: 0` and stretched over the whole viewport. Scoped to
 | Uploads | MIME sniffed from magic bytes, never from the declared type; reads scoped to the caller's space | `sniffMime()`, `listFiles()` |
 | Android bridge | only `notify()` and `platform()`; `notify()` refuses unless the current page is `https` on the deployment host | `MainActivity.onTrustedPage()` |
 | Android storage | `allowBackup=false`, `fullBackupContent=false`, `dataExtractionRules` set; file and content access off; `usesCleartextTraffic=false`; `MIXED_CONTENT_NEVER_ALLOW` | `AndroidManifest.xml`, `MainActivity` |
-| Dependency audit | `npm audit` → 0 vulnerabilities (the Worker has no runtime dependencies) | 2026-11-09 |
+| Dependency audit | `npm audit` → 0 vulnerabilities (the Worker has no runtime dependencies); the APK has **no runtime dependencies at all** (`releaseRuntimeClasspath: No dependencies`), so no third-party library ships in it | 2026-11-09 |
+| Build toolchain | Gradle 8.13 → 8.14.6 (CVE-2026-22816, high, dependency resolution); wrapper pinned with `distributionSha256Sum` | 2026-11-09 |
 
 ## Open findings
 
-### A. The APK signing key is in the repository (high)
+### A. The APK signing key is in the repository (high, open)
 `android/debug.keystore` was committed in the first commit and `android/build.sh`
 signs every published APK with it using the default passwords `android`/`android`.
 Anyone can produce an APK that Android accepts as an update of this app. It is a
@@ -79,7 +80,11 @@ app installed will refuse the update until it is uninstalled and reinstalled.
 That needs a decision (see the asks at the end) plus a new keystore stored as a
 secret and kept out of the repository.
 
-### B. Money is stored as a JSON number, not integer minor units (medium)
+### B. Money is stored as a JSON number, not integer minor units (medium, open)
+
+Backups already export money as integer paise with the unit declared in the
+file, so the format question is answered there; the storage migration is still
+waiting for approval because it rewrites every record.
 Record documents carry `amount` as a JS number (`Number()` in `web/src/format.js`).
 Amounts are rounded for display but the stored value is a float, so repeated
 sums can drift by paise. Converting to integer paise touches every collection,
@@ -97,32 +102,51 @@ answers `501` naming `RESEND_API_KEY`, so nothing pretends a message was sent, a
 the forgot-password screen now says so explicitly. Sign-up does not verify the
 address at all. Both need an email provider.
 
-### E. Social sign-in is server-side only (medium)
-`src/oauth.js` implements the code exchange for Google, Microsoft and GitHub, and
-`/api/auth/oauth/start` + `/api/auth/oauth/callback/:provider` work, but no
-provider credentials are configured (`providers[].configured: false`), the flow
-uses no PKCE, and it redirects inside the WebView, which is unreliable on
-Android. Account linking is keyed on `oauth_links(provider, provider_id)`, so the
-same person arriving through Google and then another provider gets two accounts
-even with one email. Nothing here can be finished without client IDs and a
-product decision on linking.
+### E. Social sign-in has no provider credentials (blocked)
+The flow itself is implemented and tested: PKCE S256, single-use state, the
+provider page opened in the system browser, a one-time ticket handed back through
+an App Link, and one documented account-linking rule keyed on a confirmed
+address (`docs/OAUTH.md`). What is missing is the credentials: every provider
+reports `configured: false`, so the buttons stay hidden. Nothing about the flow
+depends on them, but it cannot be exercised end to end until they exist.
 
-### F. Cloud backup has no provider credentials (high, feature)
-`src/cloud.js` and `web/src/backup.js` exist for the older "Drive backup" but
-neither provider is configured and tokens are stored in `cloud_links` without
-envelope encryption. The requested Google Drive `appDataFolder` / OneDrive
-`Files.ReadWrite.AppFolder` flow (PKCE, encrypted refresh tokens, versioned
-checksummed export, restore in a transaction, cron) is not implemented.
+### F. Cloud backup has no provider credentials (blocked)
+Same shape: Google Drive (`drive.appdata`) and OneDrive
+(`Files.ReadWrite.AppFolder`) are implemented with PKCE, refresh tokens sealed by
+AES-256-GCM under `BACKUP_KEY`, a versioned checksummed export, an all-or-nothing
+restore, and a cron trigger that is off per account by default. The signing of
+those requests needs client ids and secrets that do not exist yet, and
+`BACKUP_KEY` has to be generated and set before any drive can be connected.
 
-### G. Database constraints are enforced in code, not in the schema (medium)
-`credentials.email` is `UNIQUE`, and `records`/`profiles`/`profile_members` have
-primary keys, but there are no foreign keys (`sessions.user_id`,
-`credentials.user_id`, `profile_members.user_id`, `files.space`), no `CHECK`
-constraints and no versioned migration files: `ensureSchema()` creates tables and
-adds columns at boot. A real migration chain plus a seed script is not started.
+### G. `users` invariants are triggers rather than CHECK constraints (low)
+Every other table now carries real foreign keys and CHECK constraints (migration
+`0002_constraints`). `users` is the exception: every other table cascades from
+it, so dropping it to rebuild would delete the rows the migration just copied,
+and it keeps its column rules in `BEFORE INSERT/UPDATE` triggers instead. The
+effect is the same; the mechanism differs.
 
 ### H. `scripts/security-test.mjs` and `scripts/smoke.mjs` are not wired into CI
 They run against a live URL with the owner's PIN; CI only runs the smoke check.
+
+## Fixed since the first audit
+
+- **Locking the app emptied the WebView but kept the session**, and `pin_hash`
+  accounts could never unlock it; the unlock path now re-checks the secret
+  instead of revoking the session.
+- **A PIN-only planner could not add an email** and could not sign in at all.
+- **The tab bar covered the screen** because the mobile `nav` rule leaked onto
+  the bottom bar.
+- **The schema had no foreign keys, checks or migration history**, and
+  `ensureSchema()` created tables at boot. Replaced by
+  `src/migrations/` (`0001_baseline`, `0002_constraints`) with tests that apply
+  the chain to an empty database and upgrade a v12 fixture without losing a row.
+- **Cloud refresh tokens were stored in clear text** and the Google scope was
+  `drive.file` (the whole drive). Now `drive.appdata` /
+  `Files.ReadWrite.AppFolder` and AES-256-GCM at rest.
+- **Social sign-in had no PKCE and ran inside the WebView**, and linked accounts
+  on provider identity alone. Rebuilt, with the rule written down.
+- **Gradle 8.13 was affected by CVE-2026-22816** (high, dependency resolution);
+  upgraded to 8.14.6 and the wrapper now verifies the distribution hash.
 
 ## Asking for
 
