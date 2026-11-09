@@ -1286,9 +1286,12 @@ function lockNow() {
   if (S.locked) return;
   S.locked = true;
   S.lockError = '';
-  // Server-side enforcement: the cookie is revoked, so every other tab and any
-  // copied session stops working immediately; unlocking issues a fresh session.
-  api.lockSession().catch(() => {});
+  // The lock is enforced on this device: the screen is replaced and the data in
+  // memory is dropped. The server session is deliberately kept, because hiding the
+  // app happens on every Home press and revoking there signed the user out
+  // completely. An account that signs in with email + password has no PIN, so the
+  // PIN unlock could never succeed and the next launch landed on the sign-in form.
+  // "Sign out" and "Sign out everywhere" still revoke for real.
   if (events) {
     events.close();
     events = null;
@@ -1313,14 +1316,16 @@ function lockNow() {
 
 async function unlock(credentials) {
   try {
-    await api.login(credentials);
+    // Check the secret against the signed-in account instead of signing in again:
+    // the session is still valid, only this screen is locked.
+    await api.verifySecret(credentials);
   } catch (err) {
     S.lockError =
       err.status === 429
         ? 'Too many attempts. Wait 15 minutes.'
         : err.status === 403
           ? 'This account has no PIN. Use the email and password option.'
-          : 'That PIN or password is incorrect';
+          : err.message || 'That PIN or password is incorrect';
     render();
     return;
   }

@@ -715,6 +715,33 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true });
   }
 
+  // Re-checks the secret behind a locked screen without issuing a new session. The
+  // sign-in forms cannot be used for this: an email-only account has no PIN to type
+  // into the lock screen, and a full login would rotate the cookie on every unlock.
+  if (path === '/api/auth/verify' && method === 'POST') {
+    if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    const ip = clientIp(request);
+    if (await isLockedOut(env, ip)) throw new HttpError(429, 'Too many attempts. Wait 15 minutes.');
+    const { session } = await requireUser(request, env, url);
+    const body = await readJson(request);
+    let ok = false;
+    if (body.password) {
+      const creds = await credentialsFor(env, session.userId);
+      if (creds && creds.email) {
+        const user = await verifyPassword(env, creds.email, String(body.password));
+        ok = Boolean(user && user.id === session.userId);
+      }
+    } else {
+      ok = await verifyUserPin(env, session.userId, String(body.pin || ''));
+    }
+    if (!ok) {
+      await recordAuthFailure(env, ip);
+      throw new HttpError(401, 'That PIN or password is incorrect');
+    }
+    await clearAuthFailures(env, ip);
+    return json({ ok: true });
+  }
+
   if (path === '/api/auth/logout' && method === 'POST') {
     if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
     const session = await getSession(env, readCookie(request, COOKIE));
