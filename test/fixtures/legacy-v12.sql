@@ -1,0 +1,41 @@
+-- Shape of the database as it was before the migration chain existed (v12).
+-- Used by test/migrations.test.mjs to prove the upgrade path keeps every row.
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, pin_hash TEXT NOT NULL, pin_salt TEXT NOT NULL, iterations INTEGER NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, ua TEXT, ip TEXT);
+CREATE TABLE IF NOT EXISTS records (space TEXT NOT NULL DEFAULT 'family', collection TEXT NOT NULL, id TEXT NOT NULL, doc TEXT NOT NULL, rev INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, updated_by TEXT, PRIMARY KEY (space, collection, id));
+CREATE TABLE IF NOT EXISTS changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, space TEXT NOT NULL DEFAULT 'family', collection TEXT NOT NULL, record_id TEXT NOT NULL, op TEXT NOT NULL, actor TEXT, ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, space TEXT NOT NULL DEFAULT 'family', type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', collection TEXT, record_id TEXT, created_at INTEGER NOT NULL, read_at INTEGER, dedupe TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS push_subs (id TEXT PRIMARY KEY, endpoint TEXT UNIQUE NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL, ua TEXT, user_id TEXT);
+CREATE TABLE IF NOT EXISTS auth_fails (ip TEXT NOT NULL, ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS credentials (user_id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, password_salt TEXT, iterations INTEGER, created_at INTEGER);
+CREATE TABLE IF NOT EXISTS cloud_links (user_id TEXT NOT NULL, provider TEXT NOT NULL, refresh_token TEXT, access_token TEXT, expires_at INTEGER, created_at INTEGER, PRIMARY KEY (user_id, provider));
+CREATE TABLE IF NOT EXISTS email_otps (email TEXT PRIMARY KEY, code_hash TEXT NOT NULL, salt TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS oauth_links (provider TEXT NOT NULL, provider_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (provider, provider_id));
+CREATE TABLE IF NOT EXISTS whatsapp_links (phone TEXT PRIMARY KEY, user_id TEXT NOT NULL, profile TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS whatsapp_codes (code TEXT PRIMARY KEY, user_id TEXT NOT NULL, profile TEXT, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS whatsapp_state (phone TEXT PRIMARY KEY, collection TEXT, ids TEXT, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS whatsapp_seen (id TEXT PRIMARY KEY, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, space TEXT NOT NULL DEFAULT 'family', name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, key TEXT UNIQUE NOT NULL, collection TEXT, record_id TEXT, uploaded_by TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ai_connections (id TEXT PRIMARY KEY, provider TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL, api_key TEXT NOT NULL, created_by TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS family_invites (code TEXT PRIMARY KEY, created_by TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', expires_at INTEGER NOT NULL, used_by TEXT, used_at INTEGER);
+CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, hits INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'family', name TEXT NOT NULL, owner_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS profile_members (profile_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'editor', created_at INTEGER NOT NULL, PRIMARY KEY (profile_id, user_id));
+CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT, profile_id TEXT, action TEXT NOT NULL, target TEXT, detail TEXT);
+
+INSERT INTO meta (k, v) VALUES ('schema', '12');
+INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at) VALUES ('u-owner', 'Owner', 'hash', 'salt', 100000, 1700000000000);
+INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at) VALUES ('u-member', 'Member', '', '', 100000, 1700000001000);
+INSERT INTO credentials (user_id, email, password_hash, password_salt, iterations, created_at) VALUES ('u-owner', 'owner@example.com', 'h', 's', 100000, 1700000000000);
+INSERT INTO credentials (user_id, email, password_hash, password_salt, iterations, created_at) VALUES ('u-member', 'member@example.com', '', '', 100000, 1700000001000);
+INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES ('s-live', 'u-owner', 1700000000000, 9999999999999);
+INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES ('s-orphan', 'u-ghost', 1700000000000, 9999999999999);
+INSERT INTO oauth_links (provider, provider_id, user_id, created_at) VALUES ('google', 'g-1', 'u-owner', 1700000000000);
+INSERT INTO oauth_links (provider, provider_id, user_id, created_at) VALUES ('google', 'g-2', 'u-ghost', 1700000000000);
+INSERT INTO cloud_links (user_id, provider, refresh_token, created_at) VALUES ('u-owner', 'google', 'plain-token', 1700000000000);
+INSERT INTO profiles (id, kind, name, owner_id, created_at) VALUES ('p-family', 'family', 'Family', 'u-owner', 1700000000000);
+INSERT INTO profile_members (profile_id, user_id, role, created_at) VALUES ('p-family', 'u-owner', 'owner', 1700000000000);
+INSERT INTO profile_members (profile_id, user_id, role, created_at) VALUES ('p-gone', 'u-ghost', 'editor', 1700000000000);
+INSERT INTO records (space, collection, id, doc, rev, updated_at, updated_by) VALUES ('family', 'expenses', 'r1', '{"amount":1250.5}', 3, 1700000000000, 'u-owner');
+INSERT INTO files (id, space, name, mime, size, key, uploaded_by, created_at) VALUES ('f1', 'family', 'a.png', 'image/png', 100, 'drive/f1.png', 'u-ghost', 1700000000000);

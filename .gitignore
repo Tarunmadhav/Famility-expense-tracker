@@ -18,9 +18,13 @@ android/.gradle/
 
 # backups and encrypted exports
 *.sql
+!test/fixtures/*.sql
 *.sql.age
 *.sha256
 *.age
+
+# scratch space for local databases and profiling runs
+.tmp/
 
 # local tooling and scan output
 tools/

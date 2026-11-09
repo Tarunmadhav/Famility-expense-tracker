@@ -9,6 +9,8 @@
     "dev:api": "wrangler dev --port 8787 --local",
     "build": "node scripts/build.mjs",
     "preview": "npm run build && wrangler dev --port 8787 --local",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "db:seed": "node scripts/db-seed.mjs",
     "smoke": "node scripts/smoke.mjs",
     "security-test": "node scripts/security-test.mjs"
   },

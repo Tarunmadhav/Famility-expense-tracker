@@ -8,50 +8,15 @@ import { protectDoc, revealDoc, encryptionReady } from './fieldcrypto.js';
 import { HttpError } from './errors.js';
 import { ensureProfiles, spaceForProfile } from './profiles.js';
 import { matchTotp, newRecoveryCode, normaliseRecoveryCode, otpauthUri, randomBase32 } from './twofactor.js';
+import { applyMigrations } from './migrations/runner.js';
 
-export const SCHEMA_VERSION = '12';
+export const SCHEMA_VERSION = '13';
 // 100 000 is the maximum iteration count the production Workers runtime supports
 // for PBKDF2-SHA256; attempts are additionally rate limited (8 per 15 minutes per IP).
 const PBKDF2_ITERATIONS = 100000;
 const SESSION_DAYS = 30;
 const SWEEP_INTERVAL_MS = 60 * 1000;
 const CHANGE_RETENTION_DAYS = 30;
-
-const STATEMENTS = [
-  `CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, pin_hash TEXT NOT NULL, pin_salt TEXT NOT NULL, iterations INTEGER NOT NULL, created_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, ua TEXT, ip TEXT)`,
-  `CREATE TABLE IF NOT EXISTS records (space TEXT NOT NULL DEFAULT 'family', collection TEXT NOT NULL, id TEXT NOT NULL, doc TEXT NOT NULL, rev INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, updated_by TEXT, PRIMARY KEY (space, collection, id))`,
-  `CREATE INDEX IF NOT EXISTS records_rev_idx ON records (space, rev)`,
-  `CREATE INDEX IF NOT EXISTS records_collection_idx ON records (space, collection)`,
-  `CREATE TABLE IF NOT EXISTS changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, space TEXT NOT NULL DEFAULT 'family', collection TEXT NOT NULL, record_id TEXT NOT NULL, op TEXT NOT NULL, actor TEXT, ts INTEGER NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS changes_space_idx ON changes (space, seq)`,
-  `CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, space TEXT NOT NULL DEFAULT 'family', type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', collection TEXT, record_id TEXT, created_at INTEGER NOT NULL, read_at INTEGER, dedupe TEXT UNIQUE)`,
-  `CREATE INDEX IF NOT EXISTS notifications_created_idx ON notifications (space, created_at DESC)`,
-  `CREATE TABLE IF NOT EXISTS push_subs (id TEXT PRIMARY KEY, endpoint TEXT UNIQUE NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL, ua TEXT, user_id TEXT)`,
-  `CREATE TABLE IF NOT EXISTS auth_fails (ip TEXT NOT NULL, ts INTEGER NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS auth_fails_idx ON auth_fails (ip, ts)`,
-  `CREATE TABLE IF NOT EXISTS credentials (user_id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, password_salt TEXT, iterations INTEGER, created_at INTEGER)`,
-  `CREATE TABLE IF NOT EXISTS cloud_links (user_id TEXT NOT NULL, provider TEXT NOT NULL, refresh_token TEXT, access_token TEXT, expires_at INTEGER, created_at INTEGER, PRIMARY KEY (user_id, provider))`,
-  `CREATE TABLE IF NOT EXISTS email_otps (email TEXT PRIMARY KEY, code_hash TEXT NOT NULL, salt TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS oauth_links (provider TEXT NOT NULL, provider_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (provider, provider_id))`,
-  `CREATE TABLE IF NOT EXISTS whatsapp_links (phone TEXT PRIMARY KEY, user_id TEXT NOT NULL, profile TEXT, created_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS whatsapp_codes (code TEXT PRIMARY KEY, user_id TEXT NOT NULL, profile TEXT, expires_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS whatsapp_state (phone TEXT PRIMARY KEY, collection TEXT, ids TEXT, updated_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS whatsapp_seen (id TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, space TEXT NOT NULL DEFAULT 'family', name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, key TEXT UNIQUE NOT NULL, collection TEXT, record_id TEXT, uploaded_by TEXT, created_at INTEGER NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS files_created_idx ON files (space, created_at DESC)`,
-  `CREATE TABLE IF NOT EXISTS ai_connections (id TEXT PRIMARY KEY, provider TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL, api_key TEXT NOT NULL, created_by TEXT, created_at INTEGER NOT NULL, profile_id TEXT)`,
-  `CREATE TABLE IF NOT EXISTS family_invites (code TEXT PRIMARY KEY, created_by TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', expires_at INTEGER NOT NULL, used_by TEXT, used_at INTEGER)`,
-  `CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, hits INTEGER NOT NULL DEFAULT 0)`,
-  // v9: profiles, per-profile roles and the security audit trail.
-  `CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'family', name TEXT NOT NULL, owner_id TEXT NOT NULL, created_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS profile_members (profile_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'editor', created_at INTEGER NOT NULL, PRIMARY KEY (profile_id, user_id))`,
-  `CREATE INDEX IF NOT EXISTS profile_members_user_idx ON profile_members (user_id)`,
-  `CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT, profile_id TEXT, action TEXT NOT NULL, target TEXT, detail TEXT)`,
-  `CREATE INDEX IF NOT EXISTS audit_log_ts_idx ON audit_log (ts DESC)`,
-  `CREATE INDEX IF NOT EXISTS audit_log_profile_idx ON audit_log (profile_id, ts DESC)`,
-];
 
 let schemaReady = false;
 
@@ -142,34 +107,17 @@ export async function ensureSchema(env) {
     schemaReady = true;
     return;
   }
-  // v5 adds personal/family spaces. The migration is additive: existing rows are
-  // kept and assigned to the family book, so deploying never destroys user data.
+  // v5 adds personal/family spaces. This has to run before the schema
+  // migrations, because a pre-v5 `records` table is renamed and refilled here
+  // and the baseline only creates tables that are missing.
   await migrateSpaces(env);
-  // One round trip instead of ~30: on a fresh remote D1 every sequential
-  // prepare().run() costs real milliseconds, and this runs on the first request
-  // ever served (which is also the setup request).
-  await env.DB.batch(STATEMENTS.map((sql) => env.DB.prepare(sql)));
+  // Every table, constraint and index is defined in src/migrations/index.js and
+  // applied once, in order, recorded in `schema_migrations`. Nothing below may
+  // hand-edit the schema.
+  const applied = await applyMigrations(env, (event, id) => console.log(event, id));
+  if (applied.length) console.log('schema: applied', applied.join(', '));
+  // Data-only repairs for rows written before roles and households existed.
   await migrateV6(env);
-  // v9 often lands on a database created by v8, so the new columns are added
-  // defensively before any query can depend on them.
-  for (const [table, column, ddl] of [
-    ['push_subs', 'user_id', 'ALTER TABLE push_subs ADD COLUMN user_id TEXT'],
-    ['ai_connections', 'profile_id', 'ALTER TABLE ai_connections ADD COLUMN profile_id TEXT'],
-    ['users', 'recovery_hash', 'ALTER TABLE users ADD COLUMN recovery_hash TEXT'],
-    ['users', 'recovery_salt', 'ALTER TABLE users ADD COLUMN recovery_salt TEXT'],
-    ['users', 'totp_secret', 'ALTER TABLE users ADD COLUMN totp_secret TEXT'],
-    ['users', 'totp_enabled', 'ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0'],
-    ['users', 'totp_last_step', 'ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0'],
-    ['users', 'updated_at', 'ALTER TABLE users ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0'],
-  ]) {
-    if (!(await hasColumn(env, table, column))) {
-      try {
-        await env.DB.prepare(ddl).run();
-      } catch {
-        /* table or column already in the right shape */
-      }
-    }
-  }
   // v9: give every existing account a personal + office profile and the family
   // profile of its household. Additive and idempotent, so a deploy never locks
   // anyone out of data they could already read.
