@@ -68,7 +68,7 @@ import {
   markWhatsappMessage,
   createRecoveryCode,
   disableTotp,
-  findOrCreateOauthUser,
+  resolveOauthAccount,
   getUser,
   randomToken,
   enableTotp,
@@ -82,7 +82,15 @@ import { encryptionReady } from './fieldcrypto.js';
 import { providerInfo, startConnect, finishConnect, uploadBackup } from './cloud.js';
 import { emailConfigured, sendOtpEmail } from './email.js';
 import { handleMessage, parseWebhook, sendWhatsapp, verifySignature, whatsappConfigured } from './whatsapp.js';
-import { authorizeUrl, exchangeCode, fetchProfile, signInProviders } from './oauth.js';
+import {
+  consumeLoginTicket,
+  exchangeCode,
+  fetchIdentity,
+  issueLoginTicket,
+  providerOf,
+  signInProviders,
+  startAuthorization,
+} from './oauth.js';
 import { ICONS } from './icons.js';
 import {
   ROLE_LABEL,
@@ -151,6 +159,31 @@ export default {
       // text/JS/JSON assets, and the PWA manifest needs real PNGs.
       const iconName = url.pathname.replace(/^\//, '');
       if (ICONS[iconName]) return iconResponse(ICONS[iconName]);
+      // Android App Links verification for the OAuth return leg. The fingerprint
+      // is a public fact about the signing certificate, kept in a Worker variable
+      // so rotating the key does not need a code change. Without it the link still
+      // works; the platform only shows a chooser first.
+      if (url.pathname === '/.well-known/assetlinks.json') {
+        const fingerprints = String(env.ANDROID_SHA256 || '')
+          .split(',')
+          .map((f) => f.trim().toUpperCase())
+          .filter(Boolean);
+        if (!fingerprints.length) return json({ error: 'Android App Links are not configured' }, 404);
+        return json(
+          [
+            {
+              relation: ['delegate_permission/common.handle_all_urls'],
+              target: {
+                namespace: 'android_app',
+                package_name: 'com.family.planner',
+                sha256_cert_fingerprints: fingerprints,
+              },
+            },
+          ],
+          200,
+          { 'Cache-Control': 'public, max-age=3600', 'Content-Type': 'application/json' },
+        );
+      }
       if (url.pathname.startsWith('/api/')) {
         return await handleApi(request, env, ctx, url);
       }
@@ -515,45 +548,82 @@ async function handleApi(request, env, ctx, url) {
   }
 
   const oauthCallback = path.match(/^\/api\/auth\/oauth\/callback\/([a-z]{1,20})$/);
+
+  // Step 1 of the flow in src/oauth.js: hand the client a provider URL. The app
+  // opens it in the system browser, never inside the WebView.
   if (path === '/api/auth/oauth/start' && method === 'POST') {
     if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    if (await hitRateLimit(env, `oauth:${clientIp(request)}`, 30, 600_000)) {
+      throw new HttpError(429, 'Too many sign-in attempts. Try again in a few minutes.');
+    }
     const body = await readJson(request);
     const provider = String(body.provider || '');
-    const state = randomToken(24);
-    await setMeta(env, `signin:${state}`, { provider, at: Date.now() });
+    // Fail here, with a useful message, when the provider has no credentials yet.
+    providerOf(env, provider);
     const redirectUri = `${url.origin}/api/auth/oauth/callback/${provider}`;
-    return json({ ok: true, url: authorizeUrl(env, provider, { redirectUri, state }) });
+    const started = await startAuthorization(env, { provider, redirectUri, returnTo: body.returnTo });
+    return json({ ok: true, url: started.url });
   }
 
+  // Step 2: the provider redirects here. The code is exchanged server-side and
+  // the result is a one-time ticket, not a session: the browser that ran this
+  // has its own cookie jar, and the app needs the ticket for its own.
   if (oauthCallback && method === 'GET') {
     const provider = oauthCallback[1];
-    const state = String(url.searchParams.get('state') || '');
-    const pending = await getMeta(env, `signin:${state}`, null);
-    const back = new URL('/', url.origin);
-    if (!pending || pending.provider !== provider || Date.now() - pending.at > 600_000) {
-      back.searchParams.set('signin', 'expired');
+    const back = new URL('/api/auth/oauth/finish', url.origin);
+    if (url.searchParams.get('error')) {
+      back.searchParams.set('signin', 'denied');
       return Response.redirect(back.toString(), 302);
     }
-    await setMeta(env, `signin:${state}`, null);
     try {
-      const token = await exchangeCode(env, provider, {
+      const { token } = await exchangeCode(env, provider, {
         code: url.searchParams.get('code'),
+        state: String(url.searchParams.get('state') || ''),
         redirectUri: `${url.origin}/api/auth/oauth/callback/${provider}`,
       });
-      const profile = await fetchProfile(env, provider, token);
-      const user = await findOrCreateOauthUser(env, profile);
-      if (!user) throw new HttpError(401, 'Could not create the account');
-      const session = await createSession(env, user.id, request);
-      await audit(env, { action: 'auth.login', actor: user.id, detail: provider });
-      return new Response(null, {
-        status: 302,
-        headers: { Location: back.toString(), 'Set-Cookie': sessionCookie(session, url) },
-      });
+      const identity = await fetchIdentity(env, provider, token);
+      const { user, outcome } = await resolveOauthAccount(env, identity);
+      const ticket = await issueLoginTicket(env, user.id);
+      await audit(env, { action: 'auth.login', actor: user.id, detail: `${provider}:${outcome}` });
+      back.searchParams.set('ticket', ticket);
+      return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
     } catch (err) {
       console.error('oauth sign-in failed', provider, err && err.message);
-      back.searchParams.set('signin', 'failed');
-      return Response.redirect(back.toString(), 302);
+      back.searchParams.set('signin', err && err.status === 403 ? 'unverified' : 'failed');
+      return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
     }
+  }
+
+  // Step 3: redeem the ticket for a session in whichever agent ends up here.
+  // The Android app intercepts this URL (see AndroidManifest) and loads it in
+  // the WebView, so the cookie lands in the app's own jar.
+  if (path === '/api/auth/oauth/finish' && method === 'GET') {
+    const ticket = String(url.searchParams.get('ticket') || '');
+    const failed = new URL('/', url.origin);
+    if (url.searchParams.get('signin')) {
+      failed.searchParams.set('signin', url.searchParams.get('signin'));
+      return new Response(null, { status: 302, headers: { Location: failed.toString(), 'Cache-Control': 'no-store' } });
+    }
+    const userId = await consumeLoginTicket(env, ticket);
+    if (!userId) {
+      failed.searchParams.set('signin', 'expired');
+      return new Response(null, { status: 302, headers: { Location: failed.toString(), 'Cache-Control': 'no-store' } });
+    }
+    const user = await getUser(env, userId).catch(() => null);
+    if (!user) {
+      failed.searchParams.set('signin', 'failed');
+      return new Response(null, { status: 302, headers: { Location: failed.toString(), 'Cache-Control': 'no-store' } });
+    }
+    const session = await createSession(env, user.id, request);
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: `${url.origin}/?signin=ok`,
+        'Set-Cookie': sessionCookie(session, url),
+        'Cache-Control': 'no-store',
+        'Referrer-Policy': 'no-referrer',
+      },
+    });
   }
 
   if (path === '/api/auth/signup' && method === 'POST') {

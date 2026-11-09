@@ -235,6 +235,10 @@ async function boot() {
     const signin = params.get('signin');
     if (signin === 'failed') toast('That sign-in did not complete. Try again or use a password.');
     if (signin === 'expired') toast('That sign-in link expired. Start again.');
+    if (signin === 'unverified') {
+      toast('That account has no confirmed email address, so it cannot be linked to a planner. Confirm the address and try again.');
+    }
+    if (signin === 'denied') toast('Sign-in was cancelled in the browser.');
     if (signin) window.history.replaceState({}, '', window.location.pathname);
   } catch {
     /* no history support */
@@ -873,7 +877,18 @@ document.addEventListener('click', async (event) => {
     case 'oauth':
       await guard(async () => {
         const out = await api.oauthStart(id);
-        if (out && out.url) window.location.href = out.url;
+        if (!out || !out.url) throw new Error('The sign-in page could not be opened');
+        // The provider page must not run inside the WebView: the session cookie it
+        // would set belongs to the browser that opened it, not to the app, and
+        // Google blocks its sign-in page in an embedded WebView outright. Open the
+        // system browser and come back through the app link on
+        // /api/auth/oauth/finish.
+        const bridge = window.AndroidBridge;
+        if (bridge && typeof bridge.openExternal === 'function' && bridge.openExternal(out.url)) {
+          toast('Finish signing in in your browser, then come back to the app.');
+          return;
+        }
+        window.location.href = out.url;
       });
       return undefined;
     case 'setup':

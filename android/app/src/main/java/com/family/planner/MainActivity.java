@@ -41,6 +41,9 @@ public class MainActivity extends Activity {
             ? "" : Uri.parse(START_URL).getHost();
     private static final String CHANNEL_ID = "planner_alerts";
     private static final int NOTIFICATION_PERMISSION = 7;
+    // Social sign-in starts in the system browser and comes back as an app link on
+    // this path (see the intent filter in AndroidManifest.xml).
+    private static final String OAUTH_RETURN_PATH = "/api/auth/oauth/finish";
 
     private WebView web;
     private View splash;
@@ -119,7 +122,16 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
         setContentView(root);
-        web.loadUrl(START_URL);
+        // A cold start can itself be the return leg of a browser sign-in, in which
+        // case this replaces the normal entry point with the ticket URL.
+        Uri launch = getIntent() == null ? null : getIntent().getData();
+        if (launch != null && "https".equals(launch.getScheme())
+                && APP_HOST.equals(launch.getHost() == null ? "" : launch.getHost())
+                && (launch.getPath() == null ? "" : launch.getPath()).startsWith(OAUTH_RETURN_PATH)) {
+            web.loadUrl(launch.toString());
+        } else {
+            web.loadUrl(START_URL);
+        }
     }
 
     private View buildSplash() {
@@ -178,6 +190,28 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, NOTIFICATION_PERMISSION);
         }
+    }
+
+    /**
+     * A sign-in that started in the browser returns to {@code /api/auth/oauth/finish}
+     * with a one-time ticket. Loading that URL here, rather than in the browser,
+     * is what puts the session cookie in this app's WebView.
+     */
+    private void handleOauthReturn(Intent intent) {
+        if (intent == null) return;
+        Uri data = intent.getData();
+        if (data == null) return;
+        String host = data.getHost() == null ? "" : data.getHost();
+        String path = data.getPath() == null ? "" : data.getPath();
+        if (!"https".equals(data.getScheme()) || !APP_HOST.equals(host) || !path.startsWith(OAUTH_RETURN_PATH)) return;
+        if (web != null) web.loadUrl(data.toString());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleOauthReturn(intent);
     }
 
     @Override
@@ -287,6 +321,27 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String platform() {
             return "android";
+        }
+
+        /**
+         * Opens a provider's sign-in page in the device's browser. Only the page
+         * already loaded in this WebView may ask for it, and only for https, so
+         * injected content cannot launch arbitrary intents.
+         */
+        @JavascriptInterface
+        public boolean openExternal(String url) {
+            if (!onTrustedPage()) return false;
+            if (url == null) return false;
+            Uri uri = Uri.parse(url);
+            if (!"https".equals(uri.getScheme())) return false;
+            try {
+                Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+                return true;
+            } catch (Exception err) {
+                return false;
+            }
         }
     }
 }

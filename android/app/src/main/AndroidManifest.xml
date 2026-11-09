@@ -23,12 +23,33 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+              Sign-in with Google/Facebook/Microsoft starts in the system browser and
+              returns here with a one-time ticket. autoVerify makes Android hand this
+              path to the app instead of the browser once the domain serves
+              /.well-known/assetlinks.json with this build's signing certificate.
+              Until that is configured the platform shows a chooser, which still works.
+
+              The host is the deployment origin; move the Worker and this must change
+              with it (android/gradle.properties plannerApiBaseUrl is the other half).
+            -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="family-finance-planner.tarungudipatimadhav.workers.dev"
+                    android:pathPrefix="/api/auth/oauth/finish" />
             </intent-filter>
         </activity>
     </application>

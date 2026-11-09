@@ -144,6 +144,23 @@ export async function getMeta(env, key, fallback = null) {
   }
 }
 
+/**
+ * Read and delete a one-shot value (sign-in state, login ticket). The DELETE is a
+ * single statement and its change count decides the winner, so two concurrent
+ * callers cannot both redeem the same ticket.
+ */
+export async function takeMeta(env, key) {
+  const row = await env.DB.prepare(`SELECT v FROM meta WHERE k = ?`).bind(key).first();
+  if (!row) return null;
+  const out = await env.DB.prepare(`DELETE FROM meta WHERE k = ?`).bind(key).run();
+  if (!out || !out.meta || Number(out.meta.changes) !== 1) return null;
+  try {
+    return JSON.parse(row.v);
+  } catch {
+    return row.v;
+  }
+}
+
 export async function setMeta(env, key, value) {
   await env.DB.prepare(
     `INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
@@ -477,43 +494,73 @@ export async function whatsappState(env, phone) {
 /* ------------------------------------------------------------- social login */
 
 /**
- * Sign in with a provider identity. An existing email keeps its account; a new
- * email creates one with no password (the provider owns that credential).
+ * The account-linking rule, in one place.
+ *
+ *   1. A provider identity that has signed in before keeps its account. This is
+ *      the only rule that can override an email match, so renaming an address at
+ *      the provider cannot move an account to somebody else.
+ *   2. Otherwise the provider's address must be confirmed by the provider. An
+ *      unconfirmed address cannot claim an existing account and cannot create a
+ *      new one.
+ *   3. A confirmed address that already has an account (password, PIN or another
+ *      provider) links to that account: one household, several ways in.
+ *   4. A confirmed address with no account creates one, with an empty password so
+ *      only the provider can sign into it until the owner sets one.
+ *
+ * The outcome is returned rather than guessed, so the caller can audit whether a
+ * sign-in created an account, linked a provider or simply reused a link.
  */
-export async function findOrCreateOauthUser(env, { provider, providerId, email, name }) {
+export async function resolveOauthAccount(env, { provider, providerId, email, name, emailVerified }) {
   const clean = normaliseEmail(email);
-  const linked = await env.DB.prepare(
-    `SELECT user_id FROM oauth_links WHERE provider = ? AND provider_id = ?`,
-  )
-    .bind(provider, String(providerId))
+  const id = String(providerId || '');
+  if (!id) throw new HttpError(401, 'The provider did not identify the account');
+
+  const linked = await env.DB.prepare(`SELECT user_id FROM oauth_links WHERE provider = ? AND provider_id = ?`)
+    .bind(provider, id)
     .first();
-  let userId = linked ? linked.user_id : '';
-  if (!userId) {
-    const existing = await env.DB.prepare(`SELECT user_id FROM credentials WHERE email = ?`).bind(clean).first();
-    if (existing) {
-      userId = existing.user_id;
-    } else {
-      userId = crypto.randomUUID();
-      const home = `h:${userId}`;
-      await env.DB.batch([
-        env.DB.prepare(
-          `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at, role, household) VALUES (?, ?, '', '', ?, ?, 'owner', ?)`,
-        ).bind(userId, String(name || clean.split('@')[0]).slice(0, 60), PBKDF2_ITERATIONS, Date.now(), home),
-        env.DB.prepare(
-          `INSERT INTO credentials (user_id, email, password_hash, password_salt, iterations, created_at) VALUES (?, ?, '', '', ?, ?)`,
-        ).bind(userId, clean, PBKDF2_ITERATIONS, Date.now()),
-      ]);
-      await ensureProfiles(env);
-    }
-    await env.DB.prepare(
-      `INSERT INTO oauth_links (provider, provider_id, user_id, created_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(provider, provider_id) DO UPDATE SET user_id = excluded.user_id`,
-    )
-      .bind(provider, String(providerId), userId, Date.now())
-      .run();
+  if (linked) {
+    const row = await env.DB.prepare(`SELECT id, name FROM users WHERE id = ?`).bind(linked.user_id).first();
+    if (row) return { user: { id: row.id, name: row.name, email: clean }, outcome: 'existing-link' };
   }
+
+  if (!clean || !isEmail(clean) || !emailVerified) {
+    throw new HttpError(403, 'That account has no confirmed email address, so it cannot be linked. Confirm the address with the provider and try again.');
+  }
+
+  let userId = '';
+  let outcome = 'linked-by-email';
+  const existing = await env.DB.prepare(`SELECT user_id FROM credentials WHERE email = ?`).bind(clean).first();
+  if (existing) {
+    userId = existing.user_id;
+  } else {
+    outcome = 'created';
+    userId = crypto.randomUUID();
+    const home = `h:${userId}`;
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO users (id, name, pin_hash, pin_salt, iterations, created_at, role, household) VALUES (?, ?, '', '', ?, ?, 'owner', ?)`,
+      ).bind(userId, String(name || clean.split('@')[0]).slice(0, 60), PBKDF2_ITERATIONS, Date.now(), home),
+      env.DB.prepare(
+        `INSERT INTO credentials (user_id, email, password_hash, password_salt, iterations, created_at) VALUES (?, ?, '', '', ?, ?)`,
+      ).bind(userId, clean, PBKDF2_ITERATIONS, Date.now()),
+    ]);
+    await ensureProfiles(env);
+  }
+  await env.DB.prepare(
+    `INSERT INTO oauth_links (provider, provider_id, user_id, email, created_at) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(provider, provider_id) DO UPDATE SET user_id = excluded.user_id, email = excluded.email`,
+  )
+    .bind(provider, id, userId, clean, Date.now())
+    .run();
   const row = await env.DB.prepare(`SELECT id, name FROM users WHERE id = ?`).bind(userId).first();
-  return row ? { id: row.id, name: row.name, email: clean } : null;
+  if (!row) throw new HttpError(401, 'Could not create the account');
+  return { user: { id: row.id, name: row.name, email: clean }, outcome };
+}
+
+/** Kept for callers that only need the account. */
+export async function findOrCreateOauthUser(env, identity) {
+  const { user } = await resolveOauthAccount(env, identity);
+  return user;
 }
 
 /* ------------------------------------------------------------------- 2fa */
