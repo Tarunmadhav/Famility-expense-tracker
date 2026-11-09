@@ -25,6 +25,9 @@ android {
         versionCode = plannerVersionCode
         versionName = plannerVersionName
         buildConfigField("String", "PLANNER_URL", "\"$plannerApiBaseUrl\"")
+        // Matches the field android/build.sh generates, so MainActivity compiles
+        // the same way with Gradle and with the dependency-free shell build.
+        buildConfigField("boolean", "WEBVIEW_DEBUG", "false")
     }
 
     buildFeatures {
@@ -49,6 +52,10 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            // chrome://inspect only on a debug build; the published APK keeps it off.
+            buildConfigField("boolean", "WEBVIEW_DEBUG", "true")
+        }
         getByName("release") {
             isMinifyEnabled = false
             isShrinkResources = false
