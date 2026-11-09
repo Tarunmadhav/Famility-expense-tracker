@@ -691,10 +691,22 @@ async function handleApi(request, env, ctx, url) {
       await recordAuthFailure(env, ip);
       throw new HttpError(401, 'Invalid PIN or email');
     }
+    // A planner created before email sign-in has a PIN and no credentials row at
+    // all, so it could never sign in with an email and could never finish this
+    // reset: the account was unreachable from either form. Proving the PIN is the
+    // ownership proof this route already relies on, so the first address is
+    // attached to that account. Once an address is attached it still has to match.
     const creds = await credentialsFor(env, pinUser.id);
-    if (!creds || normaliseEmail(creds.email) !== email) {
+    const attached = normaliseEmail(creds && creds.email);
+    if (attached && attached !== email) {
       await recordAuthFailure(env, ip);
       throw new HttpError(401, 'Invalid PIN or email');
+    }
+    if (!attached) {
+      const holder = await env.DB.prepare(`SELECT user_id FROM credentials WHERE email = ?`).bind(email).first();
+      if (holder && holder.user_id !== pinUser.id) {
+        throw new HttpError(409, 'That email already has another account');
+      }
     }
     await setPassword(env, pinUser.id, email, String(body.password));
     await deleteUserSessions(env, pinUser.id);

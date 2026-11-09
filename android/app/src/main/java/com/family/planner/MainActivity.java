@@ -81,6 +81,11 @@ public class MainActivity extends Activity {
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, false);
 
+        // Lets `chrome://inspect` attach to a build made with plannerWebViewDebug.
+        // Off in the published APK: the bridge and the session cookie are only
+        // reachable from this WebView, and a remote debugger is another way in.
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.WEBVIEW_DEBUG);
+
         web.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
         web.setWebViewClient(new WebViewClient() {
             @Override
@@ -186,6 +191,11 @@ public class MainActivity extends Activity {
             web.evaluateJavascript("window.__plannerHide&&window.__plannerHide()", null);
             web.onPause();
         }
+        // A sign-in arrives as an XHR Set-Cookie, long after onPageFinished, so the
+        // cookie jar still holds it only in memory. Without this flush the process
+        // dying (swipe away, low memory) loses the session and the next launch asks
+        // the user to sign in again.
+        CookieManager.getInstance().flush();
     }
 
     @Override

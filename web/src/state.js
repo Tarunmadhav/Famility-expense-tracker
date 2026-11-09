@@ -41,6 +41,8 @@ export const S = {
   me: { name: '' },
   pushPublicKey: null,
   pushEnabled: false,
+  // Set from /api/auth/status: whether the deployment can send sign-in codes.
+  emailEnabled: false,
   demo: null,
   tab: 'dashboard',
   q: {},

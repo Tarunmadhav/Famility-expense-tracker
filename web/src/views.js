@@ -514,7 +514,7 @@ export function loginFormHtml(message = '') {
           <button class="btn wide" style="background:var(--accent);color:var(--accent-ink)">Unlock</button>
         </form>`
       : `<form id="loginfrm">
-          <div class="fld"><label for="email">Email</label><input id="email" type="email" autocomplete="username" placeholder="you@example.com" autofocus></div>
+          <div class="fld"><label for="email">Email</label><input id="email" type="email" autocomplete="username" placeholder="you@example.com" value="${esc(S.authEmail || '')}" autofocus></div>
           <div class="fld"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" placeholder="••••••••"></div>
           <button class="btn wide" style="background:var(--accent);color:var(--accent-ink)">Sign in</button>
         </form>`}
@@ -527,7 +527,9 @@ export function loginFormHtml(message = '') {
 export function forgotFormHtml(message = '') {
   if (!S.authEmailSent) {
     return `${message ? `<div class="alerts">${esc(message)}</div>` : ''}
-      <p class="mut" style="margin-top:0">Enter the email on your account and we will send a six-digit code.</p>
+      ${S.emailEnabled
+        ? '<p class="mut" style="margin-top:0">Enter the email on your account and we will send a six-digit code.</p>'
+        : '<p class="mut" style="margin-top:0">This deployment has no email sender yet, so a code cannot be sent. Use your recovery code below, or sign in with the family PIN and then set a password in Settings.</p>'}
       <form id="otpfrm">
         <div class="fld"><label for="fp_email">Email</label><input id="fp_email" type="email" autocomplete="username" placeholder="you@example.com" autofocus required></div>
         <button class="btn wide" style="background:var(--accent);color:var(--accent-ink)">Send code</button>

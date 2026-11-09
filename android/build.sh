@@ -58,7 +58,10 @@ APKSIGNER="$(tool apksigner)"
 # Gradle, so emit the same class here or MainActivity cannot resolve START_URL.
 PLANNER_URL="$(sed -n 's/^plannerApiBaseUrl=//p' "$ROOT/android/gradle.properties" | tr -d '\r' | head -1)"
 : "${PLANNER_URL:=https://family-finance-planner.tarungudipatimadhav.workers.dev/}"
-printf 'package com.family.planner;\n\npublic final class BuildConfig {\n  public static final String PLANNER_URL = "%s";\n}\n' "$PLANNER_URL" > "$OUT/gen/com/family/planner/BuildConfig.java"
+# WebView remote debugging is a testing aid only; the published build keeps it off.
+WEBVIEW_DEBUG="$(sed -n 's/^plannerWebViewDebug=//p' "$ROOT/android/gradle.properties" | tr -d '\r' | head -1)"
+: "${WEBVIEW_DEBUG:=false}"
+printf 'package com.family.planner;\n\npublic final class BuildConfig {\n  public static final String PLANNER_URL = "%s";\n  public static final boolean WEBVIEW_DEBUG = %s;\n}\n' "$PLANNER_URL" "$WEBVIEW_DEBUG" > "$OUT/gen/com/family/planner/BuildConfig.java"
 
 GEN_FILES=()
 while IFS= read -r file; do GEN_FILES+=("$file"); done < <(find "$OUT/gen" -name '*.java')

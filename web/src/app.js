@@ -249,6 +249,7 @@ async function boot() {
     S.me = status.user;
     S.pushPublicKey = status.push ? S.pushPublicKey : null;
     S.authProviders = status.providers || [];
+    S.emailEnabled = Boolean(status.email);
     await checkForUpdate();
     await loadApp();
     await applyDeepLinkProfile();
@@ -1221,11 +1222,25 @@ document.addEventListener('change', async (event) => {
       const email = document.getElementById('su_email').value.trim();
       const password = document.getElementById('su_password').value;
       const code = (document.getElementById('su_code') || {}).value || '';
-      if (!/^[A-Za-z0-9]{4,64}$/.test(password) && password.length < 8) {
+      // Same rule as the server (8-72 characters with a letter and a number), so
+      // the form never accepts a password the API will reject.
+      if (!/^(?=.*[A-Za-z])(?=.*\d).{8,72}$/.test(password)) {
         return toast('Use at least 8 characters with a letter and a number');
       }
       await guard(async () => {
-        const out = await api.signup(name, email, password, code);
+        let out;
+        try {
+          out = await api.signup(name, email, password, code);
+        } catch (err) {
+          if (err.status === 409) {
+            S.error = 'That email already has an account. Sign in instead.';
+            S.authView = 'login';
+            S.authEmail = email;
+            render();
+            return;
+          }
+          throw err;
+        }
         S.error = '';
         await loadApp();
         toast('Account created');
@@ -1382,10 +1397,18 @@ async function guard(fn, fallbackMessage = '') {
     await fn();
   } catch (err) {
     if (err.status === 401) {
+      // A 401 from the sign-in forms means "wrong credentials" and must not be
+      // replaced by the generic session message; anywhere else it does.
+      if (fallbackMessage) {
+        toast(fallbackMessage);
+        return;
+      }
       setView('login', 'Please sign in again.');
       return;
     }
-    toast(fallbackMessage || err.message || 'Something went wrong');
+    // The server's own words are the useful ones (rate limit, missing email
+    // provider, already-registered address), so prefer them over a generic line.
+    toast(err.message || fallbackMessage || 'Something went wrong');
   }
 }
 
