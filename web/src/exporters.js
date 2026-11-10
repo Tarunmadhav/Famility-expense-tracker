@@ -329,9 +329,11 @@ export function docsFromCsv(collection, text) {
 
 export function whatsappLink(phone, text) {
   const d = digits(phone);
-  if (d.length < 10) return '';
-  const number = d.length === 10 ? `91${d}` : d;
-  return `https://wa.me/${number}?text=${encodeURIComponent(text)}`;
+  // wa.me needs the full international number. A bare 10-digit value is ambiguous
+  // (India, the US and others all have 10-digit national numbers), so it is not
+  // guessed at — the shortcut is simply not offered until a country code is saved.
+  if (d.length < 11) return '';
+  return `https://wa.me/${d}?text=${encodeURIComponent(text)}`;
 }
 
 export function smsLink(phone, text) {

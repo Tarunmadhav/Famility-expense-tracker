@@ -125,6 +125,80 @@ export async function sendWhatsapp(env, to, body) {
   return { ok: res.ok };
 }
 
+/* --------------------------------------------------- outbound notifications */
+
+/**
+ * Proactive messages (bills due tomorrow, a renewal reminder) are not replies: Meta
+ * only delivers them as an approved template, and only when the business opted in.
+ * The switch is the WHATSAPP_MESSAGING flag, so a deployment can hold the credentials
+ * without anything leaving the Worker until someone turns it on.
+ */
+export function whatsappMessagingConfigured(env) {
+  return (
+    String(env.WHATSAPP_MESSAGING || '').trim().toLowerCase() === 'on' &&
+    whatsappConfigured(env) &&
+    Boolean(String(env.WHATSAPP_TEMPLATE || '').trim())
+  );
+}
+
+/** What is still missing, named, so the settings screen can say it out loud. */
+export function whatsappMessagingMissing(env) {
+  const missing = [];
+  if (String(env.WHATSAPP_MESSAGING || '').trim().toLowerCase() !== 'on') missing.push('WHATSAPP_MESSAGING=on');
+  if (!String(env.WHATSAPP_TOKEN || '').trim()) missing.push('WHATSAPP_TOKEN');
+  if (!String(env.WHATSAPP_PHONE_ID || '').trim()) missing.push('WHATSAPP_PHONE_ID');
+  if (!String(env.WHATSAPP_TEMPLATE || '').trim()) missing.push('WHATSAPP_TEMPLATE');
+  return missing;
+}
+
+/**
+ * Send one approved-template notification. Never throws and never fakes success:
+ * an unconfigured deployment answers `{ ok: false, reason: 'not-configured' }` and
+ * makes no network call at all.
+ */
+export async function sendWhatsappTemplate(env, to, { template, params = [], language = 'en' } = {}) {
+  if (!whatsappMessagingConfigured(env)) {
+    return { ok: false, reason: 'not-configured', missing: whatsappMessagingMissing(env) };
+  }
+  // Stored numbers are E.164 and always carry the +. A bare national number is
+  // ambiguous, so it is refused instead of being sent to a guessed country.
+  const typed = String(to || '').trim();
+  const digits = typed.replace(/\D/g, '');
+  if (!typed.startsWith('+') || !/^[1-9]\d{7,14}$/.test(digits)) return { ok: false, reason: 'bad-number' };
+  const name = String(template || env.WHATSAPP_TEMPLATE || '').trim();
+  try {
+    const res = await fetch(`${GRAPH}/${encodeURIComponent(String(env.WHATSAPP_PHONE_ID).trim())}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${String(env.WHATSAPP_TOKEN).trim()}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: digits,
+        type: 'template',
+        template: {
+          name,
+          language: { code: String(language || 'en') },
+          components: params.length
+            ? [{ type: 'body', parameters: params.map((p) => ({ type: 'text', text: String(p).slice(0, 200) })) }]
+            : [],
+        },
+      }),
+    });
+    if (!res.ok) {
+      // The body can echo the recipient, never the token: log it truncated only.
+      const detail = await res.text().catch(() => '');
+      console.error('whatsapp template send failed', res.status, detail.slice(0, 200));
+      return { ok: false, reason: `provider-${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error('whatsapp template send error', String(err && err.message).slice(0, 160));
+    return { ok: false, reason: 'network' };
+  }
+}
+
 /* --------------------------------------------------------------- helpers */
 
 const ALIASES = {

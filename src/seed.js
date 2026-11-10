@@ -3,11 +3,16 @@
 // Settings > Import Google Contacts CSV to load your own address book.
 
 export const SETTINGS = {
-  mobile: '+91 8985800099',
+  // Deliberately empty: the alert number must be typed by whoever owns the account,
+  // never inherited from this sample file. A seeded number showed up in Settings
+  // as if the user had entered it, and WhatsApp shortcuts messaged a stranger.
+  mobile: '',
   alertTime: '06:00',
   channel: 'Push + in-app',
   currency: 'INR',
-  household: 'Gudipati Family',
+  // Also left empty: a new account used to be named after the sample household,
+  // which put one family's name in front of everybody else.
+  household: '',
 };
 
 export const FAMILY = [
