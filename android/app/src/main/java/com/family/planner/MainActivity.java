@@ -19,6 +19,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -47,6 +48,9 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private View splash;
+    // System bar height in CSS pixels, published to the page as --inset-top/--inset-bottom.
+    private int insetTopDp;
+    private int insetBottomDp;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -107,6 +111,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 hideSplash();
+                pushInsets();
                 CookieManager.getInstance().flush();
             }
         });
@@ -122,6 +127,7 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
         setContentView(root);
+        watchInsets(root);
         // A cold start can itself be the return leg of a browser sign-in, in which
         // case this replaces the normal entry point with the ticket URL.
         Uri launch = getIntent() == null ? null : getIntent().getData();
@@ -176,6 +182,50 @@ public class MainActivity extends Activity {
                 if (splash != null) splash.setVisibility(View.GONE);
             }
         }).start();
+    }
+
+    /*
+     * Android 15 forces every app targeting SDK 35 edge to edge, and a WebView does
+     * not expose env(safe-area-inset-*) on Android, so the top bar was drawn under
+     * the status bar and could not be tapped. Whatever the platform gives us here is
+     * published to the page as --inset-top / --inset-bottom, which style.css adds to
+     * the top bar, the drawer and the tab bar.
+     */
+    private void watchInsets(View root) {
+        root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View view, WindowInsets insets) {
+                readInsets(insets);
+                pushInsets();
+                return insets;
+            }
+        });
+        root.requestApplyInsets();
+    }
+
+    private void readInsets(WindowInsets insets) {
+        if (insets == null) return;
+        int top;
+        int bottom;
+        if (Build.VERSION.SDK_INT >= 30) {
+            android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+            top = bars.top;
+            bottom = bars.bottom;
+        } else {
+            top = insets.getSystemWindowInsetTop();
+            bottom = insets.getSystemWindowInsetBottom();
+        }
+        float density = getResources().getDisplayMetrics().density;
+        if (density <= 0f) density = 1f;
+        insetTopDp = Math.round(top / density);
+        insetBottomDp = Math.round(bottom / density);
+    }
+
+    private void pushInsets() {
+        if (web == null) return;
+        String js = "document.documentElement.style.setProperty('--inset-top','" + insetTopDp
+                + "px');document.documentElement.style.setProperty('--inset-bottom','" + insetBottomDp + "px');";
+        web.evaluateJavascript(js, null);
     }
 
     private void createChannel() {
@@ -321,6 +371,17 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String platform() {
             return "android";
+        }
+
+        /**
+         * Status and navigation bar height in CSS pixels, as "top,bottom". The page
+         * reads this once at startup so the first painted header already clears the
+         * status bar instead of jumping down after onPageFinished.
+         */
+        @JavascriptInterface
+        public String insets() {
+            if (!onTrustedPage()) return "0,0";
+            return insetTopDp + "," + insetBottomDp;
         }
 
         /**

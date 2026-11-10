@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Android 15 draws every app targeting SDK 35 edge to edge and ignores a runtime
+      opt-out request. This build keeps the pre-15 layout there (the WebView still
+      gets the real insets through MainActivity, which is what Android 16 and later
+      rely on once this attribute is gone).
+    -->
+    <style name="AppTheme" parent="AppTheme.Base">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

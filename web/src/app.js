@@ -23,12 +23,35 @@ import {
 } from './exporters.js';
 import { esc } from './format.js';
 
+/*
+ * The Android shell cannot expose env(safe-area-inset-*) to a WebView, and Google's
+ * WebView leaves the page under the status bar. The shell publishes the real bar
+ * heights as --inset-top/--inset-bottom; style.css adds them to the top bar, the
+ * drawer and the tab bar. In a browser the bridge is absent and the env() fallback
+ * applies instead.
+ */
+function syncNativeInsets() {
+  const bridge = window.AndroidBridge;
+  if (!bridge || typeof bridge.insets !== 'function') return;
+  try {
+    const [top, bottom] = String(bridge.insets() || '0,0').split(',');
+    document.documentElement.style.setProperty('--inset-top', `${Number(top) || 0}px`);
+    document.documentElement.style.setProperty('--inset-bottom', `${Number(bottom) || 0}px`);
+  } catch {
+    /* the bridge is a convenience; the CSS fallback still works */
+  }
+}
+
+syncNativeInsets();
+window.addEventListener('resize', syncNativeInsets);
+
 S.view = 'loading';
 S.activity = [];
 S.sessions = [];
 S.currentSession = '';
 S.files = [];
 S.filesTotal = 0;
+S.calendarFeed = '';
 S.storage = true;
 S.aiConnections = [];
 S.account = {};
@@ -254,9 +277,10 @@ async function boot() {
     S.pushPublicKey = status.push ? S.pushPublicKey : null;
     S.authProviders = status.providers || [];
     S.emailEnabled = Boolean(status.email);
-    await checkForUpdate();
-    await loadApp();
-    await applyDeepLinkProfile();
+    // The update check is a second round-trip that nothing on screen waits for, so
+    // it runs after the planner is painted instead of in front of it.
+    loadApp().then(() => applyDeepLinkProfile());
+    checkForUpdate().catch(() => {});
   } catch (err) {
     setView('login', `Cannot reach the planner API: ${err.message}`);
   }
@@ -288,10 +312,16 @@ async function loadApp() {
   render();
   startRealtime();
   startPolling();
-  await detectPush();
-  await checkPendingNotifications(true);
-  announceProfile();
-  ctxSafeLoadInbox();
+  // Paint first, then the work that only adds chrome: push registration touches
+  // the service worker, the inbox is another request, and the announcement is a
+  // text update. None of it may hold up the first frame.
+  const after = (fn) => (window.requestIdleCallback ? window.requestIdleCallback(fn) : setTimeout(fn, 200));
+  after(() => {
+    detectPush().catch(() => {});
+    checkPendingNotifications(true).catch(() => {});
+    announceProfile();
+    ctxSafeLoadInbox();
+  });
 }
 
 /** Tell the service worker which profile is open, for discreet push text. */
@@ -1098,12 +1128,37 @@ document.addEventListener('click', async (event) => {
       return importCsv(collection);
     case 'saveset':
       return saveSettings();
+    case 'save-mobile':
+      return saveMobile();
     case 'ics': {
       const out = buildICS();
       download(calendarFileName(), out.text, 'text/calendar;charset=utf-8');
       toast(`${out.count} events prepared`);
       return undefined;
     }
+    case 'ics-copy': {
+      if (!S.calendarFeed) return undefined;
+      try {
+        await navigator.clipboard.writeText(S.calendarFeed);
+        toast('Calendar URL copied');
+      } catch {
+        // Clipboard access can be refused outside a secure context; showing the
+        // URL is still enough for the user to copy it by hand.
+        window.prompt('Copy this calendar URL', S.calendarFeed);
+      }
+      return undefined;
+    }
+    case 'ics-rotate':
+      if (!confirm('Create a new calendar URL? Calendars still using the old address stop updating until you add the new one.')) {
+        return undefined;
+      }
+      await guard(async () => {
+        const out = await api.rotateCalendarFeed(S.profileId);
+        S.calendarFeed = out.url || '';
+        render();
+        toast('New calendar URL created');
+      });
+      return undefined;
     case 'backup': {
       const payload = { exportedAt: new Date().toISOString(), settings: S.settings, data: S.db };
       download(`Family_Finance_Planner_Backup_${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2), 'application/json');
@@ -1133,10 +1188,29 @@ document.addEventListener('click', async (event) => {
       setView('login');
       return undefined;
     case 'push-on':
+      // The Android app asks for the notification permission itself and uses its own
+      // bridge, so the web-push subscription would fail there for no benefit.
+      if (window.AndroidBridge && typeof window.AndroidBridge.notify === 'function') {
+        toast('This phone shows planner alerts through the app — nothing to enable here');
+        return undefined;
+      }
       return enableNotifications();
     case 'push-off':
+      if (window.AndroidBridge) {
+        toast('Turn alerts off in Android settings → Apps → Family Planner → Notifications');
+        return undefined;
+      }
       return disableNotifications();
     case 'push-test':
+      if (window.AndroidBridge && typeof window.AndroidBridge.notify === 'function') {
+        try {
+          window.AndroidBridge.notify('Family Planner test alert', 'This is how a bill or renewal reminder arrives on this phone.');
+          toast('Test notification sent to the tray');
+        } catch {
+          toast('The app could not post a notification on this phone');
+        }
+        return undefined;
+      }
       await guard(async () => {
         const res = await api.testPush();
         toast(res.sent ? `Test sent to ${res.sent} device(s)` : 'No device is subscribed yet');
@@ -1494,6 +1568,7 @@ async function loadSettingsData() {
     S.backupRuns = cloud.runs || [];
     S.backupKeyConfigured = Boolean(cloud.keyConfigured);
     S.whatsapp = await api.whatsappState().catch(() => ({ configured: false, links: [] }));
+    S.calendarFeed = (await api.calendarFeedUrl(S.profileId).catch(() => ({}))).url || '';
     S.security = {
       twoFactor: Boolean(twofa.enabled),
       hasRecovery: Boolean(account && account.hasRecovery),
@@ -1659,9 +1734,13 @@ async function changePin() {
 }
 
 async function saveSettings() {
+  const value = (id) => {
+    const el = document.getElementById(id);
+    return el ? el.value.trim() : '';
+  };
   const settings = {
-    household: document.getElementById('s_household').value.trim(),
-    mobile: document.getElementById('s_mobile').value.trim(),
+    household: value('s_household'),
+    mobile: value('s_mobile'),
     alertTime: document.getElementById('s_time').value || '06:00',
     channel: document.getElementById('s_channel').value.trim(),
   };
@@ -1670,6 +1749,26 @@ async function saveSettings() {
     S.settings = out.settings;
     toast('Settings saved');
     render();
+  });
+}
+
+/** The number WhatsApp and SMS shortcuts use; saved from its own card. */
+async function saveMobile() {
+  const input = document.getElementById('s_mobile');
+  if (!input) return;
+  const typed = input.value.trim();
+  // Same rule as the server (src/phone.js): E.164 only, empty means "no alerts".
+  const digits = typed.replace(/[^\d]/g, '');
+  const mobile = typed ? `+${digits}` : '';
+  if (typed && (!typed.startsWith('+') || !/^[1-9]\d{7,14}$/.test(digits))) {
+    toast('Enter the number with its country code, for example +91 98765 43210');
+    return;
+  }
+  await guard(async () => {
+    const out = await api.saveSettings({ ...S.settings, mobile });
+    S.settings = out.settings;
+    render();
+    toast(mobile ? 'WhatsApp number saved' : 'WhatsApp number cleared');
   });
 }
 

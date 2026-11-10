@@ -66,14 +66,19 @@ printf 'package com.family.planner;\n\npublic final class BuildConfig {\n  publi
 GEN_FILES=()
 while IFS= read -r file; do GEN_FILES+=("$file"); done < <(find "$OUT/gen" -name '*.java')
 
-javac -nowarn -source 8 -target 8 -classpath "$AJAR" -d "$OUT/classes" \
+# -encoding UTF-8: the splash and the notification text use ₹ and …, and without this
+# javac reads the source in the Windows platform charset and the APK shows mojibake.
+javac -nowarn -encoding UTF-8 -source 8 -target 8 -classpath "$AJAR" -d "$OUT/classes" \
   "$SRC/com/family/planner/MainActivity.java" \
   "${GEN_FILES[@]}"
 
 CLASS_FILES=()
 while IFS= read -r file; do CLASS_FILES+=("$file"); done < <(find "$OUT/classes" -name '*.class')
 
-"$D8" --lib "$AJAR" --min-api 26 --output "$OUT/dex" "${CLASS_FILES[@]}"
+# --release lets d8 optimise and strip debug metadata. The shell is small, so this
+# is a few KB rather than a transformation, but it is free and it is the same
+# shrinker a release build would apply.
+"$D8" --release --lib "$AJAR" --min-api 26 --output "$OUT/dex" "${CLASS_FILES[@]}"
 
 (cd "$OUT/dex" && jar uf "$OUT/app-unsigned.apk" classes.dex)
 

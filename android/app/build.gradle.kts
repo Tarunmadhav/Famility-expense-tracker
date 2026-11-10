@@ -69,6 +69,12 @@ android {
     }
 }
 
+// The splash and notification strings contain ₹ and …, so compile as UTF-8 no matter
+// what the host's default charset is (Windows defaults to a legacy code page).
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
+}
+
 /**
  * Release builds must be signed with the owner's keystore. If any of the four
  * variables is missing we stop with an explicit message instead of silently

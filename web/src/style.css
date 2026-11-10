@@ -44,7 +44,7 @@ a:hover { text-decoration-color: var(--ink); }
 hr, .divider { border: 0; }
 
 /* ---------------------------------------------------------------- chrome */
-header { background: var(--card); color: var(--ink); padding: calc(10px + env(safe-area-inset-top)) 16px 10px; position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--line); }
+header { background: var(--card); color: var(--ink); padding: calc(10px + var(--inset-top, env(safe-area-inset-top))) 16px 10px; position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--line); }
 .hrow { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; min-width: 0; }
 .hrow > div:first-child { min-width: 0; flex: 1 1 auto; }
 header h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -86,8 +86,11 @@ main { width: 100%; max-width: 1280px; margin: 0 auto; padding: 14px clamp(12px,
 
 /* ---------------------------------------------------------------- tables */
 .tw { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+/* A phone used to squeeze four columns into 320px and break words mid-syllable
+   ("passwor d"). Keep the table wide enough to read and let the wrapper scroll. */
 table { border-collapse: collapse; width: 100%; min-width: 0; table-layout: auto; }
-td, th { overflow-wrap: anywhere; }
+.tw table { min-width: 360px; }
+td, th { overflow-wrap: break-word; }
 th, td { padding: 7px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 12.5px; }
 th { background: var(--tint); color: var(--mute); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; cursor: pointer; white-space: nowrap; position: sticky; top: 0; }
 tr:nth-child(even) td { background: color-mix(in srgb, var(--tint) 55%, transparent); }
@@ -101,6 +104,8 @@ td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-n
 
 /* --------------------------------------------------------------- controls */
 .tools { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
+/* A long, unbreakable secret URL must wrap instead of widening the card. */
+.urlbox { font: 500 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; background: var(--tint); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; user-select: all; }
 input, select, textarea { font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; max-width: 100%; }
 input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--ink) 15%, transparent); outline-offset: 0; border-color: var(--mute); }
 input.search { flex: 1 1 220px; min-width: 160px; }
@@ -222,7 +227,7 @@ input.search { flex: 1 1 220px; min-width: 160px; }
 
 /* 768 and below: controls move to a single bottom bar, header keeps one line */
 @media (max-width: 767px) {
-  header { padding: calc(8px + env(safe-area-inset-top)) 12px 8px; }
+  header { padding: calc(8px + var(--inset-top, env(safe-area-inset-top))) 12px 8px; }
   .hsub { display: none; }
   .hactions .seg, .hactions .hbtn { display: none; }
   nav:not(.tabbar) { top: 45px; padding: 6px 8px; }
@@ -235,7 +240,7 @@ input.search { flex: 1 1 220px; min-width: 160px; }
     z-index: 40;
     background: var(--card);
     border-top: 1px solid var(--line);
-    padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+    padding: 4px 4px calc(4px + var(--inset-bottom, env(safe-area-inset-bottom)));
   }
   .mobilebar button {
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
@@ -328,8 +333,13 @@ input.search { flex: 1 1 220px; min-width: 160px; }
 .kl { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--mute); }
 .kv { font-size: 19px; font-weight: 650; letter-spacing: -.02em; }
 .kh { font-size: 10.5px; color: var(--mute); }
-.split { display: grid; gap: 12px; }
-.split.wide { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+/* A grid track is as wide as its widest unbreakable child unless it is told
+   otherwise, and these panels hold nowrap labels. On a 360px phone the old
+   minmax(320px, 1fr) track came out wider than the viewport, which let the page
+   pan sideways and pushed the header's right-hand buttons off screen. */
+.split { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+.split.wide { grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
+.split > *, .grid > *, .stats > * { min-width: 0; }
 .panel.card { margin-bottom: 0; }
 .phead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .phead h2 { margin: 0; font-size: 12.5px; font-weight: 650; }
@@ -376,15 +386,15 @@ input.search { flex: 1 1 220px; min-width: 160px; }
 
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; }
-  .sidebar { position: fixed; inset: 0 auto 0 0; width: min(84vw, 310px); z-index: 70; transform: translateX(-100%); transition: transform .18s ease; box-shadow: 0 20px 50px rgba(9, 9, 11, .28); }
+  .sidebar { position: fixed; inset: 0 auto 0 0; width: min(84vw, 310px); z-index: 70; transform: translateX(-100%); transition: transform .18s ease; box-shadow: 0 20px 50px rgba(9, 9, 11, .28); padding-top: calc(14px + var(--inset-top, env(safe-area-inset-top))); padding-bottom: calc(14px + var(--inset-bottom, env(safe-area-inset-bottom))); }
   .sidebar.open { transform: none; }
   .scrim { position: fixed; inset: 0; background: rgba(9, 9, 11, .45); z-index: 65; }
   .drawer-close { display: inline-block; }
   .only-desktop, .gsearch { display: none; }
-  .content { padding-bottom: 88px; }
-  .tabbar { display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; background: var(--card); border-top: 1px solid var(--line); padding: 3px 4px calc(5px + env(safe-area-inset-bottom)); }
-  .topbar { padding-top: calc(9px + env(safe-area-inset-top)); }
-  .split.wide { grid-template-columns: 1fr; }
+  .content { padding-bottom: calc(88px + var(--inset-bottom, 0px)); }
+  .tabbar { display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; background: var(--card); border-top: 1px solid var(--line); padding: 3px 4px calc(5px + var(--inset-bottom, env(safe-area-inset-bottom))); }
+  .topbar { padding-top: calc(9px + var(--inset-top, env(safe-area-inset-top))); }
+  .split.wide { grid-template-columns: minmax(0, 1fr); }
   .stats { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
   .kpi { padding: 10px; }
   .lrow { padding: 10px 2px; }
@@ -395,11 +405,11 @@ input.search { flex: 1 1 220px; min-width: 160px; }
   /* Phones stacked a title row, a subtitle, a coloured section bar and the page
      heading one under the other. Keep one compact header and let the content
      start immediately. */
-  .topbar { padding: 8px 12px; gap: 8px; }
+  .topbar { padding: 8px 12px; padding-top: calc(8px + var(--inset-top, env(safe-area-inset-top))); gap: 8px; }
   .tbsub, .synctext { display: none; }
   .tb-title h1 { font-size: 14px; }
   .sync { padding: 3px 7px; }
-  .content { padding-top: 10px; padding-bottom: 82px; }
+  .content { padding-top: 10px; padding-bottom: calc(82px + var(--inset-bottom, 0px)); }
   .bar { padding: 7px 10px; font-size: 10.5px; border-radius: 8px; margin-bottom: 8px; }
   .card { padding: 12px; border-radius: 12px; }
   .card > h2 { font-size: 14px; margin-bottom: 8px; }
