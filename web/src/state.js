@@ -35,7 +35,11 @@ export function applyState(payload) {
 export const S = {
   rev: 0,
   db: emptyDb(),
-  settings: { mobile: '', alertTime: '06:00', channel: 'Push + in-app', household: '' },
+  settings: { alertTime: '06:00', channel: 'Push + in-app', household: '' },
+  // Telegram link state from /api/telegram; the code lives only long enough to
+  // be read off the screen, and never reaches local storage.
+  telegram: null,
+  telegramCode: '',
   notifications: [],
   unread: 0,
   me: { name: '' },

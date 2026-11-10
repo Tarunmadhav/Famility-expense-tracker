@@ -33,6 +33,30 @@ export function csvOf(collection) {
   return `\ufeff${[head, ...body].join('\r\n')}`;
 }
 
+/**
+ * Every record in the open book as one sheet: a `collection` and `id` column make
+ * the rows identifiable, and the union of the fields is the header. Used by
+ * "Download CSV" in Settings so the file is one download, not twenty.
+ */
+export function csvAll() {
+  const q = (v) => {
+    const s = String(v == null ? '' : v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const columns = [];
+  for (const name of Object.keys(COLLECTIONS)) {
+    for (const f of COLLECTIONS[name].fields) if (!columns.includes(f.k)) columns.push(f.k);
+  }
+  const head = ['collection', 'id', ...columns].map(q).join(',');
+  const rows = [];
+  for (const name of Object.keys(COLLECTIONS)) {
+    for (const row of S.db[name] || []) {
+      rows.push([name, row.id, ...columns.map((k) => row[k])].map(q).join(','));
+    }
+  }
+  return `\ufeff${[head, ...rows].join('\r\n')}`;
+}
+
 /* ------------------------------------------------------- Google Calendar */
 
 function at(isoDate, hhmm, addMin = 0) {
@@ -325,22 +349,7 @@ export function docsFromCsv(collection, text) {
   return { docs };
 }
 
-/* -------------------------------------------------- WhatsApp and SMS */
-
-export function whatsappLink(phone, text) {
-  const d = digits(phone);
-  // wa.me needs the full international number. A bare 10-digit value is ambiguous
-  // (India, the US and others all have 10-digit national numbers), so it is not
-  // guessed at — the shortcut is simply not offered until a country code is saved.
-  if (d.length < 11) return '';
-  return `https://wa.me/${d}?text=${encodeURIComponent(text)}`;
-}
-
-export function smsLink(phone, text) {
-  const d = digits(phone);
-  const number = d.length >= 10 ? `+${d}` : '';
-  return `sms:${number}?body=${encodeURIComponent(text)}`;
-}
+/* ------------------------------------------------------------- plain text */
 
 export function alertDigestText() {
   const alerts = alertsList();

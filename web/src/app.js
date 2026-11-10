@@ -11,6 +11,7 @@ import {
   alertDigestText,
   buildICS,
   calendarFileName,
+  csvAll,
   csvOf,
   csvTemplate,
   docsFromCsv,
@@ -18,8 +19,6 @@ import {
   googleContactsToDocs,
   notificationMessage,
   recordMessage,
-  smsLink,
-  whatsappLink,
 } from './exporters.js';
 import { esc } from './format.js';
 
@@ -773,6 +772,33 @@ document.addEventListener('click', async (event) => {
       );
       return undefined;
     }
+    case 'download-csv': {
+      download(`Family_Finance_Planner_${new Date().toISOString().slice(0, 10)}.csv`, csvAll(), 'text/csv;charset=utf-8');
+      toast('CSV downloaded');
+      return undefined;
+    }
+    case 'help': {
+      const el = document.getElementById('modal');
+      if (el) {
+        el.innerHTML = `<div class="modal" data-stop="1"><div class="card" style="max-width:520px;margin:12vh auto" data-stop="1">
+          <h2>Help</h2>
+          <p class="mut">Every book has the same controls: <b>+ Add</b> opens a form, the search box filters the table, and the arrows on a column header sort it.</p>
+          <ul class="hint mut" style="padding-left:18px">
+            <li><b>Family / Mine</b> at the top switches books. Family is shared, Mine is private to you.</li>
+            <li><b>Bell</b> shows alerts; the server raises them for bills, renewals, tasks and birthdays.</li>
+            <li><b>Export</b> in a module downloads that table as CSV; Settings → Data downloads everything.</li>
+            <li><b>Telegram</b> alerts are optional and only go to a chat you link in Settings.</li>
+            <li><b>Lock</b> in the drawer clears the screen until your PIN or password is entered again.</li>
+          </ul>
+          <div class="tools"><button class="btn g" data-act="close-modal">Close</button></div></div></div>`;
+      }
+      return undefined;
+    }
+    case 'close-modal': {
+      const el = document.getElementById('modal');
+      if (el) el.innerHTML = '';
+      return undefined;
+    }
     case 'restore-backup':
       return restoreFromFile();
     case 'inbox-filter':
@@ -891,18 +917,6 @@ document.addEventListener('click', async (event) => {
       );
       toast('Template downloaded - fill it in and import it back');
       return undefined;
-    case 'wa':
-    case 'sms': {
-      const text = messageFor(target.getAttribute('data-target'));
-      const phone = target.getAttribute('data-phone') || S.settings.mobile;
-      const link = act === 'wa' ? whatsappLink(phone, text) : smsLink(phone, text);
-      if (!link || !phone) {
-        toast('Add a mobile number in Settings first');
-        return undefined;
-      }
-      window.open(link, '_blank', 'noopener');
-      return undefined;
-    }
     case 'signup':
       S.authView = 'signup';
       S.error = '';
@@ -989,20 +1003,29 @@ document.addEventListener('click', async (event) => {
         toast('Two-factor turned off');
       });
       return undefined;
-    case 'wa-link':
+    case 'tg-link':
       await guard(async () => {
-        const out = await api.whatsappLinkCode(S.profileId);
-        S.whatsappCode = out.code;
+        const out = await api.telegramLinkCode();
+        S.telegramCode = out.code;
         render();
       });
       return undefined;
-    case 'wa-unlink':
+    case 'tg-unlink':
       await guard(async () => {
-        await api.whatsappUnlink();
-        S.whatsappCode = '';
-        S.whatsapp = await api.whatsappState().catch(() => ({ configured: false, links: [] }));
+        await api.telegramUnlink();
+        S.telegramCode = '';
+        S.telegram = await api.telegramState().catch(() => ({ configured: false }));
         render();
-        toast('This number can no longer reach the planner');
+        toast('This chat will not receive planner alerts any more');
+      });
+      return undefined;
+    case 'tg-preview':
+      await guard(async () => {
+        const choice = document.getElementById('tg_preview').value;
+        await api.telegramPrefs(choice);
+        S.telegram = await api.telegramState().catch(() => S.telegram);
+        render();
+        toast(choice === 'detailed' ? 'Alerts will include amounts' : 'Alerts will show a generic preview');
       });
       return undefined;
     case 'cloud-link':
@@ -1144,8 +1167,6 @@ document.addEventListener('click', async (event) => {
       return importCsv(collection);
     case 'saveset':
       return saveSettings();
-    case 'save-mobile':
-      return saveMobile();
     case 'ics': {
       const out = buildICS();
       download(calendarFileName(), out.text, 'text/calendar;charset=utf-8');
@@ -1583,7 +1604,7 @@ async function loadSettingsData() {
     S.cloudState = cloud.settings || { enabled: false, frequency: 'daily', keep: 7, provider: null };
     S.backupRuns = cloud.runs || [];
     S.backupKeyConfigured = Boolean(cloud.keyConfigured);
-    S.whatsapp = await api.whatsappState().catch(() => ({ configured: false, links: [] }));
+    S.telegram = await api.telegramState().catch(() => ({ configured: false }));
     S.calendarFeed = (await api.calendarFeedUrl(S.profileId).catch(() => ({}))).url || '';
     S.security = {
       twoFactor: Boolean(twofa.enabled),
@@ -1756,7 +1777,6 @@ async function saveSettings() {
   };
   const settings = {
     household: value('s_household'),
-    mobile: value('s_mobile'),
     alertTime: document.getElementById('s_time').value || '06:00',
     channel: document.getElementById('s_channel').value.trim(),
   };
@@ -1765,26 +1785,6 @@ async function saveSettings() {
     S.settings = out.settings;
     toast('Settings saved');
     render();
-  });
-}
-
-/** The number WhatsApp and SMS shortcuts use; saved from its own card. */
-async function saveMobile() {
-  const input = document.getElementById('s_mobile');
-  if (!input) return;
-  const typed = input.value.trim();
-  // Same rule as the server (src/phone.js): E.164 only, empty means "no alerts".
-  const digits = typed.replace(/[^\d]/g, '');
-  const mobile = typed ? `+${digits}` : '';
-  if (typed && (!typed.startsWith('+') || !/^[1-9]\d{7,14}$/.test(digits))) {
-    toast('Enter the number with its country code, for example +91 98765 43210');
-    return;
-  }
-  await guard(async () => {
-    const out = await api.saveSettings({ ...S.settings, mobile });
-    S.settings = out.settings;
-    render();
-    toast(mobile ? 'WhatsApp number saved' : 'WhatsApp number cleared');
   });
 }
 

@@ -8,8 +8,7 @@ import {
   googleCalendarLink,
   notificationMessage,
   recordMessage,
-  smsLink,
-  whatsappLink,
+
 } from './exporters.js';
 
 export function headerSub() {
@@ -117,7 +116,7 @@ export function computedColumns(collection, row) {
     const day = Number.isNaN(d.getTime()) ? '' : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()];
     return [
       { v: day, badge: false },
-      { v: row.status === 'Completed' ? 'No alert needed' : `Reminder to ${S.settings.mobile}`, badge: true },
+      { v: row.status === 'Completed' ? 'No alert needed' : 'Alert queued', badge: true },
     ];
   }
   if (collection === 'budgetIn') {
@@ -213,8 +212,6 @@ export function tableView(collection) {
     }
     if ((collection === 'payments' || collection === 'diary' || collection === 'insurance')) {
       html += `<a class="btn s g" target="_blank" rel="noopener" href="${esc(googleCalendarLink(collection, r))}">📅</a> `;
-      const wa = whatsappLink(r.phone || r.alert || S.settings.mobile, recordMessage(collection, r));
-      if (wa) html += `<a class="btn s wa" target="_blank" rel="noopener" href="${esc(wa)}">WA</a> `;
     }
     html += `<button class="btn s g" data-act="edit" data-ek="${collection}" data-id="${esc(r.id)}">Edit</button> <button class="btn s r" data-act="del" data-ek="${collection}" data-id="${esc(r.id)}">✕</button></td></tr>`;
   });
@@ -263,7 +260,9 @@ export function settingsView() {
         : 'Notifications are not enabled yet.';
 
   const security = S.security || {};
-  return `<div class="card"><h2>Your profile</h2>
+  return `
+  <h2 class="grouphead">Account</h2>
+  <div class="card"><h2>Your profile</h2>
       <div class="mrow"><span>Signed in as</span><b>${esc(S.me.name || '-')}</b></div>
       <div class="fld" style="margin-top:10px"><label for="ac_name">Display name</label><input id="ac_name" maxlength="60" value="${esc(S.me.name || '')}"></div>
       <button class="btn" data-act="save-name">Save name</button>
@@ -275,7 +274,6 @@ export function settingsView() {
       <div class="fld"><label>New password (8+ chars, letters and numbers)</label><input id="ac_next" type="password" autocomplete="new-password"></div>
       <button class="btn" data-act="save-password">Save password</button>
       <p class="mut">Members sign in with their own email; everyone shares this household's data.</p></div>
-
   <div class="card"><h2>People with access to this profile</h2>
     <p class="mut">${esc(S.profile ? S.profile.name : 'This profile')} is shared with the accounts below. Personal profiles are never shared, and office data never appears in the family profile. Roles decide what each person can do: an <b>Owner</b> manages everything, an <b>Admin</b> manages records and members, an <b>Editor</b> adds and edits, a <b>Viewer</b> only reads.</p>
     <div class="tw"><table><thead><tr><th>Member</th><th>Email</th><th>Role</th><th></th></tr></thead><tbody>${(S.profileMembers || [])
@@ -294,7 +292,6 @@ export function settingsView() {
       .join('') || '<tr><td colspan="4" class="mut">Only you so far</td></tr>'}</tbody></table></div>
     ${S.profile && S.profile.role === 'owner' ? `<p style="margin-top:10px"><button class="btn" data-act="invite">Create invite code</button></p>${S.invite ? `<div class="alerts">Invite code <b>${esc(S.invite.code)}</b> — expires in 72 hours. This code is shown once, so copy it now.</div>` : ''}` : ''}
   </div>
-
   <div class="card"><h2>Two-factor &amp; recovery</h2>
     <p class="mut" style="margin-top:0">Two-factor adds a six-digit code from an authenticator app on top of your
       password or PIN. A recovery code resets a forgotten PIN without any device.</p>
@@ -312,17 +309,111 @@ export function settingsView() {
           <div class="tools"><button class="btn g" data-act="2fa-off">Turn off two-factor</button><button class="btn g" data-act="recovery-new">New recovery code</button></div>`
         : `<div class="tools"><button class="btn" data-act="2fa-start">Set up two-factor</button><button class="btn g" data-act="recovery-new">${security.hasRecovery ? 'New recovery code' : 'Create recovery code'}</button></div>`}
   </div>
-
+  <div class="card"><h2>Appearance &amp; security</h2>
+    <div class="row2">
+      <div class="fld"><label>Theme</label><div class="seg"><button data-act="theme" data-theme="light" class="${S.theme !== 'dark' ? 'on' : ''}">Light</button><button data-act="theme" data-theme="dark" class="${S.theme === 'dark' ? 'on' : ''}">Dark</button></div></div>
+      <div class="fld"><label>Lock automatically after</label><select id="s_lock">${[[0.5, '30 seconds'], [1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [0, 'Off (not recommended)']].map(([v, l]) => `<option value="${v}"${Number(S.lockMinutes) === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
+    </div>
+    <div class="fld"><label>Custom timeout (seconds, 15-86400)</label><div class="tools" style="margin:0"><input id="s_lock_custom" type="number" min="15" max="86400" value="${Math.round((Number(S.lockMinutes) || 5) * 60)}" style="max-width:160px"><button class="btn s g" data-act="save-lock">Use custom</button></div></div>
+    <p class="hint mut">The screen locks after that much inactivity and asks for your PIN or password again. Locking also clears the loaded data from this tab. <button class="linkbtn" data-act="lock">Lock now</button></p>
+    <h3>Books</h3>
+    <p class="hint mut">Switch with Family / Mine at the top. <b>Family</b> is the shared household book every member sees. <b>Mine</b> is private to your login — nobody else, including other family members, can read it.</p>
+    <div class="seg" role="group" aria-label="Profiles">${(S.profiles || [])
+      .map(
+        (p) =>
+          `<button data-act="profile" data-profile="${esc(p.id)}" class="${p.id === S.profileId ? 'on' : ''}">${esc(
+            p.name,
+          )}</button>`,
+      )
+      .join('')}</div></div>
+  <div class="card"><h2>Household &amp; alert settings</h2>
+    <div class="fld"><label>Household name</label><input id="s_household" placeholder="e.g. Gudipati household" value="${esc(S.settings.household || '')}"></div>
+    <div class="fld"><label>Daily alert time (used for calendar events)</label><input id="s_time" type="time" value="${esc(S.settings.alertTime || '06:00')}"></div>
+    <div class="fld"><label for="s_channel">Alert channel</label><select id="s_channel">${['Push + in-app', 'Telegram', 'All channels'].map((c) => `<option${c === (S.settings.channel || 'Push + in-app') ? ' selected' : ''}>${c}</option>`).join('')}</select></div>
+    <p class="mut">Alerts are shown in the app and pushed to your devices; Telegram is used for the chats you linked above.</p>
+    <button class="btn" data-act="saveset">Save settings</button></div>
+  <div class="card"><h2>Security</h2>
+    <div class="fld"><label>Current PIN</label><input id="p_cur" type="password" inputmode="numeric" autocomplete="current-password"></div>
+    <div class="fld"><label>New PIN (4-12 digits)</label><input id="p_new" type="password" inputmode="numeric" autocomplete="new-password"></div>
+    <button class="btn" data-act="change-pin">Change PIN</button>
+    <div class="tw" style="margin-top:12px"><table><thead><tr><th>Device</th><th>Signed in</th><th>Status</th></tr></thead><tbody>${sessionRows}</tbody></table></div>
+    <p style="margin-top:10px"><button class="btn r" data-act="revoke-sessions">Sign out all devices</button>
+    <button class="btn g" data-act="logout">Sign out here</button></p></div>
+  <div class="card"><h2>Security audit</h2>
+    <p class="mut">Sign-ins, failed sign-ins, profile switches, sharing and role changes, exports and deletions, newest first. No financial values or keys are recorded here.</p>
+    <details><summary class="mut">Show the last ${(S.audit || []).length} events</summary>
+      <div class="tw"><table><thead><tr><th>When</th><th>Action</th><th>Who</th><th>Target</th></tr></thead><tbody>${(S.audit || [])
+        .map(
+          (e) => `<tr><td class="mut">${esc(relative(e.ts))}</td><td>${esc(e.action)}</td><td>${esc(e.actor_name || 'system')}</td><td class="mut">${esc(e.target || e.detail || '')}</td></tr>`,
+        )
+        .join('') || '<tr><td colspan="4" class="mut">No audit events yet</td></tr>'}</tbody></table></div>
+    </details>
+  </div>
+  <div class="card"><h2>AI tools</h2>
+    <p class="mut">Connect any OpenAI-compatible provider (OpenAI, Z.ai GLM, Groq, OpenRouter). The key is stored on the server, never sent to the browser, and only used when you scan a bill.</p>
+    ${(S.aiConnections || []).length ? `<div class="tw"><table><thead><tr><th>Provider</th><th>Model</th><th>Base URL</th><th></th></tr></thead><tbody>${S.aiConnections.map((c) => `<tr><td>${esc(c.provider)}</td><td>${esc(c.model)}</td><td class="mut">${esc(c.base_url)}</td><td class="act"><button class="btn s g" data-act="ai-test" data-id="${esc(c.id)}">Test</button> <button class="btn s r" data-act="ai-del" data-id="${esc(c.id)}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mut">No AI tool connected yet — bill scanning needs one.</p>'}
+    <div class="fld" style="margin-top:10px"><label>Provider name</label><input id="ai_provider" placeholder="OpenAI / Z.ai / Groq"></div>
+    <div class="fld"><label>Base URL</label><input id="ai_url" placeholder="https://api.openai.com/v1"></div>
+    <div class="fld"><label>Model with image support</label><input id="ai_model" placeholder="gpt-4o-mini / glm-4v"></div>
+    <div class="fld"><label>API key</label><input id="ai_key" type="password" autocomplete="off" placeholder="Stored on the server"></div>
+    <button class="btn" data-act="ai-add">Connect AI tool</button></div>
+  <h2 class="grouphead">Notifications</h2>
+  <div class="card" id="card-telegram"><h2>Telegram</h2>
+    ${(!S.telegram || S.telegram.configured === false)
+      ? `<p class="hint mut">Not set up yet — owner action needed: add <code>${esc(((S.telegram && S.telegram.missing) || ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET']).join(', '))}</code> as ${(((S.telegram && S.telegram.missing) || []).length === 1 ? 'a Worker secret' : 'Worker secrets')} and point the bot's webhook at <code>/api/telegram/webhook</code>.</p>`
+      : S.telegram.link
+        ? `<div class="mrow"><span>Connected chat</span><b>${esc(S.telegram.link.username ? `@${S.telegram.link.username}` : S.telegram.link.telegramUserId || 'Telegram')}</b></div>
+          <div class="mrow"><span>Linked</span><b>${esc(relative(S.telegram.link.linkedAt))}</b></div>
+          ${S.telegram.link.blocked ? '<p class="hint mut">The bot is blocked in that chat, so nothing is being delivered. Send /start to the bot to resume.</p>' : ''}
+          <div class="fld"><label for="tg_preview">What alerts show</label>
+            <select id="tg_preview">
+              <option value="generic"${S.telegram.link.preview !== 'detailed' ? ' selected' : ''}>A generic preview (“You have a new planner alert”)</option>
+              <option value="detailed"${S.telegram.link.preview === 'detailed' ? ' selected' : ''}>The title and amount</option>
+            </select>
+          </div>
+          <div class="tools"><button class="btn s" data-act="tg-preview">Save preference</button>
+            <button class="btn s r" data-act="tg-unlink">Disconnect</button></div>`
+        : `<p class="mut" style="margin-top:0">Get planner alerts — bills due, renewals, tasks and birthdays — in Telegram. One bot serves every household; only a chat you link here receives your alerts, and disconnecting stops them immediately.</p>
+          <p class="mut">1. Open the planner bot in Telegram (the one whose token this deployment uses).<br>2. Press <b>Connect Telegram</b> below and send the code to the bot.<br>3. The code works once and expires in 10 minutes.</p>
+          <button class="btn" data-act="tg-link">Connect Telegram</button>
+          ${S.telegramCode ? `<div class="alerts" data-stop="1">Send <b>/link ${esc(S.telegramCode)}</b> to the bot. It works once and expires in 10 minutes.</div>` : ''}`}
+    <p class="hint mut">Commands: <code>/start</code>, <code>/link CODE</code>, <code>/status</code>, <code>/settings</code>, <code>/unlink</code>, <code>/help</code>.</p>
+  </div>
+  <div class="card"><h2>Mobile notifications</h2><p class="mut">${esc(pushState)}</p>
+    <p class="mut">Bills due, insurance renewals, tasks and birthdays are checked by the server every minute and pushed to every signed-in device the moment they change.</p>
+    <button class="btn" data-act="push-on">Enable notifications</button>
+    <button class="btn g" data-act="push-test">Send test notification</button>
+    <button class="btn g" data-act="push-off">Turn off on this device</button>
+    <button class="btn g" data-act="install">Install app</button></div>
+  <div class="card"><h2>Calendar subscription</h2>
+    <p class="mut" style="margin-top:0">Subscribe once and your calendar keeps itself up to date: open tasks, unpaid bills, insurance renewals and subscription renewals, each with reminders. Works with Google Calendar, Apple Calendar, Outlook, Thunderbird and anything else that accepts a calendar URL. Events update in place, so a paid bill disappears instead of piling up.</p>
+    <p class="hint mut" style="margin:0 0 8px">This URL shows only the <b>${esc((S.profiles || []).find((p) => p.id === S.profileId)?.name || 'current')}</b> book. Switch book and open Settings again for that book's own URL.</p>
+    ${S.calendarFeed
+      ? `<div class="urlbox" aria-label="Calendar feed URL">${esc(S.calendarFeed)}</div>
+    <div class="tools"><button class="btn" data-act="ics-copy">Copy URL</button>
+      <button class="btn g" data-act="ics">Download .ics once</button>
+      <button class="btn g" data-act="ics-rotate">New URL</button></div>`
+      : `<p class="mut">Open Settings once you are signed in to get your calendar URL.</p>`}
+    <details style="margin-top:10px"><summary class="mut">How to add it in each calendar</summary>
+      <ul class="hint mut" style="margin:8px 0 0;padding-left:18px">
+        <li><b>Google Calendar</b> (web): Other calendars → + → <i>From URL</i> → paste → Add calendar. The Android and iPhone apps then show it automatically.</li>
+        <li><b>Apple Calendar</b> (iPhone/iPad/Mac): Settings → Calendar → Accounts → Add Account → Other → <i>Add Subscribed Calendar</i> → paste.</li>
+        <li><b>Outlook</b>: Calendar → Add calendar → <i>Subscribe from web</i> → paste → Import.</li>
+        <li><b>Thunderbird / Nextcloud</b>: New calendar → <i>On the network</i> → paste the URL.</li>
+      </ul>
+      <p class="hint mut">The URL is a secret: anyone who has it can read your event titles, so use <b>New URL</b> if it leaks. It only ever contains the books you are a member of.</p>
+    </details></div>
+  <h2 class="grouphead">Backup</h2>
   <div class="card"><h2>Backup</h2>
-    <p class="mut" style="margin-top:0">Keep a full copy of every book you can open in <b>your own</b> Google Drive or OneDrive.
+    <p class="mut" style="margin-top:0">Keep a full copy of every book you can open in <b>your own</b> Google Drive.
       The file is versioned JSON with a SHA-256 checksum, and the connection keeps a revocable token for the account you pick —
       the app never sees your drive password, and it can only reach its own private app folder.</p>
     ${(S.cloud || []).map((p) => {
       const runs = (S.backupRuns || []).filter((r) => r.provider === p.id);
       const files = (S.backupFiles || {})[p.id] || null;
       return `<div class="mrow"><span><b>${esc(p.label)}</b><br>
-        <span class="mut">${p.linkedAt ? `Connected ${relativetimeFrom(p.linkedAt)}` : p.configured ? 'Not connected' : 'Not configured'}</span></span>
-        <b>${p.lastBackupAt ? `Last backup ${relativetimeFrom(p.lastBackupAt)}` : p.configured ? (p.linkedAt ? 'No backup yet' : '—') : 'Owner must add credentials'}</b>
+        <span class="mut">${p.linkedAt ? `Connected ${relativetimeFrom(p.linkedAt)}` : p.configured ? 'Not connected' : 'Not set up (owner action needed)'}</span></span>
+        <b>${p.lastBackupAt ? `Last backup ${relativetimeFrom(p.lastBackupAt)}` : p.configured ? (p.linkedAt ? 'No backup yet' : '—') : '—'}</b>
         <span class="act">
           ${p.linkedAt
             ? `<button class="btn s" data-act="cloud-upload" data-id="${esc(p.id)}">Back up now</button>
@@ -330,7 +421,7 @@ export function settingsView() {
                <button class="btn s r" data-act="cloud-unlink" data-id="${esc(p.id)}">Disconnect</button>`
             : p.configured
               ? `<button class="btn s" data-act="cloud-link" data-id="${esc(p.id)}">Connect</button>`
-              : `<span class="mut" style="font-size:12px">${p.id === 'google' ? 'GOOGLE_CLIENT_ID' : 'MICROSOFT_CLIENT_ID'}</span>`}
+              : '<span class="mut" style="font-size:12px">Not set up (owner action needed)</span>'}
         </span>
       </div>
       ${files
@@ -347,11 +438,11 @@ export function settingsView() {
         : ''}`;
     }).join('')}
     ${(S.cloud || []).some((p) => !p.configured)
-      ? `<p class="hint mut">A provider becomes available once the owner adds its OAuth client id and secret as Worker secrets.
-          Both providers also need a <code>BACKUP_KEY</code> secret so a refresh token can be stored encrypted.</p>`
+      ? `<p class="hint mut">Not set up — owner action needed: <code>GOOGLE_CLIENT_ID</code> in <code>wrangler.jsonc</code> and
+          <code>GOOGLE_CLIENT_SECRET</code> as a Worker secret.</p>`
       : ''}
     ${S.backupKeyConfigured === false
-      ? '<p class="hint mut"><b>BACKUP_KEY is not set</b>, so a drive cannot be connected: without it the refresh token could not be stored encrypted.</p>'
+      ? '<p class="hint mut"><b>Backup key not set (owner action needed)</b> — without <code>BACKUP_KEY</code> a refresh token cannot be stored encrypted, so a drive cannot be connected.</p>'
       : ''}
 
     <h3 style="margin:16px 0 6px;font-size:15px">Automatic backup</h3>
@@ -377,127 +468,40 @@ export function settingsView() {
     </div>
     <p class="hint mut">Automatic backup is off unless you turn it on. When it runs, the oldest backups beyond the number you keep are deleted from the app folder.</p>
   </div>
-
-  <div class="card" id="card-whatsapp"><h2>WhatsApp</h2>
-    <p class="mut" style="margin-top:0">Text the planner to read, add, change or remove anything: expenses,
-      bills, tasks, insurance, loans and contacts. A number only gets access after you link it here.</p>
-    ${S.whatsapp && S.whatsapp.messaging && S.whatsapp.messaging.configured === false
-      ? `<p class="hint mut">WhatsApp messaging not configured: <code>${esc((S.whatsapp.messaging.missing || []).join(', ') || 'missing secrets')}</code>. The number below still powers the WhatsApp shortcuts on bills and alerts, which open your own WhatsApp to send the message yourself — the planner sends nothing until the secrets and an approved template are set.</p>`
-      : S.whatsapp && S.whatsapp.configured === false
-        ? '<p class="hint mut">Ask the owner to add WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, WHATSAPP_VERIFY_TOKEN and WHATSAPP_APP_SECRET as Worker secrets, then point the Meta webhook at <code>/api/whatsapp/webhook</code>.</p>'
-        : ''}
-    <div class="fld"><label>Your WhatsApp number</label><input id="s_mobile" type="tel" inputmode="tel" autocomplete="tel" placeholder="+91 98765 43210" value="${esc(S.settings.mobile || '')}"></div>
-    <p class="hint mut" style="margin-top:-2px">With the country code. Alerts open WhatsApp with the message ready to send, and this is the number the planner replies to once it is linked.</p>
-    <button class="btn s g" data-act="save-mobile">Save number</button>
-    ${(S.whatsapp && S.whatsapp.links ? S.whatsapp.links : []).map((l) => `<div class="mrow"><span>${esc(l.phone)}</span><b>Linked</b>
-      <span class="act"><button class="btn s r" data-act="wa-unlink">Unlink</button></span></div>`).join('')}
-    ${S.whatsappCode
-      ? `<div class="alerts">Send <b>link ${esc(S.whatsappCode)}</b> from your WhatsApp to the planner's number. The code works once and expires in 10 minutes.
-        ${S.whatsapp && S.whatsapp.number ? `<div class="tools" style="margin:8px 0 0"><a class="btn s wa" target="_blank" rel="noopener" href="https://wa.me/${esc(S.whatsapp.number)}?text=${encodeURIComponent(`link ${S.whatsappCode}`)}">Open WhatsApp with the code</a></div>` : ''}</div>`
-      : S.whatsapp && S.whatsapp.configured === false
-        ? ''
-        : '<p style="margin-top:10px"><button class="btn g" data-act="wa-link">Create link code</button></p>'}
-    <p class="hint mut">Try <code>summary</code>, <code>add expense 250 groceries</code>, <code>list bills</code>, <code>done bills 1</code>.</p>
-  </div>
-
-  <div class="card"><h2>Appearance &amp; security</h2>
-    <div class="row2">
-      <div class="fld"><label>Theme</label><div class="seg"><button data-act="theme" data-theme="light" class="${S.theme !== 'dark' ? 'on' : ''}">Light</button><button data-act="theme" data-theme="dark" class="${S.theme === 'dark' ? 'on' : ''}">Dark</button></div></div>
-      <div class="fld"><label>Lock automatically after</label><select id="s_lock">${[[0.5, '30 seconds'], [1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [0, 'Off (not recommended)']].map(([v, l]) => `<option value="${v}"${Number(S.lockMinutes) === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
-    </div>
-    <div class="fld"><label>Custom timeout (seconds, 15-86400)</label><div class="tools" style="margin:0"><input id="s_lock_custom" type="number" min="15" max="86400" value="${Math.round((Number(S.lockMinutes) || 5) * 60)}" style="max-width:160px"><button class="btn s g" data-act="save-lock">Use custom</button></div></div>
-    <p class="hint mut">The screen locks after that much inactivity and asks for your PIN or password again. Locking also clears the loaded data from this tab. <button class="linkbtn" data-act="lock">Lock now</button></p>
-    <h3>Books</h3>
-    <p class="hint mut">Switch with Family / Mine at the top. <b>Family</b> is the shared household book every member sees. <b>Mine</b> is private to your login — nobody else, including other family members, can read it.</p>
-    <div class="seg" role="group" aria-label="Profiles">${(S.profiles || [])
-      .map(
-        (p) =>
-          `<button data-act="profile" data-profile="${esc(p.id)}" class="${p.id === S.profileId ? 'on' : ''}">${esc(
-            p.name,
-          )}</button>`,
-      )
-      .join('')}</div></div>
-
-    <div class="card"><h2>Household &amp; alert settings</h2>
-    <div class="fld"><label>Household name</label><input id="s_household" placeholder="e.g. Gudipati household" value="${esc(S.settings.household || '')}"></div>
-    <div class="fld"><label>Daily alert time (used for calendar events)</label><input id="s_time" type="time" value="${esc(S.settings.alertTime || '06:00')}"></div>
-    <div class="fld"><label>Alert channel</label><select id="s_channel">${['Push + in-app', 'WhatsApp', 'SMS', 'All channels'].map((c) => `<option${c === (S.settings.channel || 'Push + in-app') ? ' selected' : ''}>${c}</option>`).join('')}</select></div>
-    <p class="mut">WhatsApp and SMS open your own messenger with the alert text ready to send — nothing is sent automatically.</p>
-    <button class="btn" data-act="saveset">Save settings</button></div>
-
-  <div class="card"><h2>Mobile notifications</h2><p class="mut">${esc(pushState)}</p>
-    <p class="mut">Bills due, insurance renewals, tasks and birthdays are checked by the server every minute and pushed to every signed-in device the moment they change.</p>
-    <button class="btn" data-act="push-on">Enable notifications</button>
-    <button class="btn g" data-act="push-test">Send test notification</button>
-    <button class="btn g" data-act="push-off">Turn off on this device</button>
-    <button class="btn g" data-act="install">Install app</button>
-    ${S.release && S.release.apkUrl ? `<a class="btn g" href="${esc(S.release.apkUrl)}" target="_blank" rel="noopener">Android APK ${esc(S.release.version || '')}</a>` : ''}</div>
-
-  <div class="card"><h2>Security</h2>
-    <div class="fld"><label>Current PIN</label><input id="p_cur" type="password" inputmode="numeric" autocomplete="current-password"></div>
-    <div class="fld"><label>New PIN (4-12 digits)</label><input id="p_new" type="password" inputmode="numeric" autocomplete="new-password"></div>
-    <button class="btn" data-act="change-pin">Change PIN</button>
-    <div class="tw" style="margin-top:12px"><table><thead><tr><th>Device</th><th>Signed in</th><th>Status</th></tr></thead><tbody>${sessionRows}</tbody></table></div>
-    <p style="margin-top:10px"><button class="btn r" data-act="revoke-sessions">Sign out all devices</button>
-    <button class="btn g" data-act="logout">Sign out here</button></p></div>
-
-  <div class="card"><h2>AI tools</h2>
-    <p class="mut">Connect any OpenAI-compatible provider (OpenAI, Z.ai GLM, Groq, OpenRouter). The key is stored on the server, never sent to the browser, and only used when you scan a bill.</p>
-    ${(S.aiConnections || []).length ? `<div class="tw"><table><thead><tr><th>Provider</th><th>Model</th><th>Base URL</th><th></th></tr></thead><tbody>${S.aiConnections.map((c) => `<tr><td>${esc(c.provider)}</td><td>${esc(c.model)}</td><td class="mut">${esc(c.base_url)}</td><td class="act"><button class="btn s g" data-act="ai-test" data-id="${esc(c.id)}">Test</button> <button class="btn s r" data-act="ai-del" data-id="${esc(c.id)}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mut">No AI tool connected yet — bill scanning needs one.</p>'}
-    <div class="fld" style="margin-top:10px"><label>Provider name</label><input id="ai_provider" placeholder="OpenAI / Z.ai / Groq"></div>
-    <div class="fld"><label>Base URL</label><input id="ai_url" placeholder="https://api.openai.com/v1"></div>
-    <div class="fld"><label>Model with image support</label><input id="ai_model" placeholder="gpt-4o-mini / glm-4v"></div>
-    <div class="fld"><label>API key</label><input id="ai_key" type="password" autocomplete="off" placeholder="Stored on the server"></div>
-    <button class="btn" data-act="ai-add">Connect AI tool</button></div>
-
-  <div class="card"><h2>Documents drive</h2>
-    <p class="mut">${(S.files || []).length} file${(S.files || []).length === 1 ? '' : 's'} · ${((S.filesTotal || 0) / 1048576).toFixed(2)} MB used${S.storage === false ? ' · storage is not configured for this site' : ''}. Bills and policy documents you attach are kept here.</p>
-    ${(S.files || []).length ? `<div class="tw"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Added</th><th></th></tr></thead><tbody>${S.files.map((f) => `<tr><td><a href="/api/files/${esc(f.id)}" target="_blank" rel="noopener">${esc(f.name)}</a></td><td class="mut">${esc(String(f.mime).split('/')[1] || f.mime)}</td><td class="num">${Math.round(Number(f.size) / 1024)} KB</td><td class="mut">${esc(relative(f.created_at))}</td><td class="act"><button class="btn s r" data-act="drive-del" data-id="${esc(f.id)}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mut">Nothing uploaded yet — attach a bill from the Expenses form.</p>'}</div>
-
-  <div class="card"><h2>Calendar subscription</h2>
-    <p class="mut" style="margin-top:0">Subscribe once and your calendar keeps itself up to date: open tasks, unpaid bills, insurance renewals and subscription renewals, each with reminders. Works with Google Calendar, Apple Calendar, Outlook, Thunderbird and anything else that accepts a calendar URL. Events update in place, so a paid bill disappears instead of piling up.</p>
-    <p class="hint mut" style="margin:0 0 8px">This URL shows only the <b>${esc((S.profiles || []).find((p) => p.id === S.profileId)?.name || 'current')}</b> book. Switch book and open Settings again for that book's own URL.</p>
-    ${S.calendarFeed
-      ? `<div class="urlbox" aria-label="Calendar feed URL">${esc(S.calendarFeed)}</div>
-    <div class="tools"><button class="btn" data-act="ics-copy">Copy URL</button>
-      <button class="btn g" data-act="ics">Download .ics once</button>
-      <button class="btn g" data-act="ics-rotate">New URL</button></div>`
-      : `<p class="mut">Open Settings once you are signed in to get your calendar URL.</p>`}
-    <details style="margin-top:10px"><summary class="mut">How to add it in each calendar</summary>
-      <ul class="hint mut" style="margin:8px 0 0;padding-left:18px">
-        <li><b>Google Calendar</b> (web): Other calendars → + → <i>From URL</i> → paste → Add calendar. The Android and iPhone apps then show it automatically.</li>
-        <li><b>Apple Calendar</b> (iPhone/iPad/Mac): Settings → Calendar → Accounts → Add Account → Other → <i>Add Subscribed Calendar</i> → paste.</li>
-        <li><b>Outlook</b>: Calendar → Add calendar → <i>Subscribe from web</i> → paste → Import.</li>
-        <li><b>Thunderbird / Nextcloud</b>: New calendar → <i>On the network</i> → paste the URL.</li>
-      </ul>
-      <p class="hint mut">The URL is a secret: anyone who has it can read your event titles, so use <b>New URL</b> if it leaks. It only ever contains the books you are a member of.</p>
-    </details></div>
-
   <div class="card"><h2>Backup &amp; restore</h2>
-    <p class="mut">Create an encrypted backup of <b>${esc(S.profile ? S.profile.name : 'this profile')}</b> only. The file is sealed with AES-256-GCM under a passphrase you choose here; the passphrase and the key never reach the server, so neither this app nor anyone running it can read the backup. Store it in Google Drive, OneDrive or anywhere else — it stays encrypted.</p>
+    <p class="mut">Create an encrypted backup of <b>${esc(S.profile ? S.profile.name : 'this profile')}</b> only. The file is sealed with AES-256-GCM under a passphrase you choose here; the passphrase and the key never reach the server, so neither this app nor anyone running it can read the backup. Store it in Google Drive, on a USB stick, or anywhere else — it stays encrypted.</p>
     <div class="tools"><button class="btn" data-act="backup">Create encrypted backup</button>
     <button class="btn g" data-act="restore-backup">Restore from backup</button></div>
     <p class="hint mut">Restoring validates the file first, shows how many records it holds, asks for confirmation, and merges by id — it never wipes the profile first. A backup only contains the profile it was made from.</p>
   </div>
-
-  <div class="card"><h2>Data</h2><p class="mut">Everything is stored in the planner database and synced live to every device that signs in. Export a plain copy any time.</p>
-    <button class="btn g" data-act="backup-plain">Download plain JSON</button>
-    <button class="btn g" data-act="sample-data">Load sample data</button>
-    <button class="btn r" data-act="clear-data">Clear all data</button>
+  <h2 class="grouphead">Data</h2>
+  <div class="card"><h2>Documents drive</h2>
+    <p class="mut">${(S.files || []).length} file${(S.files || []).length === 1 ? '' : 's'} · ${((S.filesTotal || 0) / 1048576).toFixed(2)} MB used${S.storage === false ? ' · storage is not configured for this site' : ''}. Bills and policy documents you attach are kept here.</p>
+    ${(S.files || []).length ? `<div class="tw"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Added</th><th></th></tr></thead><tbody>${S.files.map((f) => `<tr><td><a href="/api/files/${esc(f.id)}" target="_blank" rel="noopener">${esc(f.name)}</a></td><td class="mut">${esc(String(f.mime).split('/')[1] || f.mime)}</td><td class="num">${Math.round(Number(f.size) / 1024)} KB</td><td class="mut">${esc(relative(f.created_at))}</td><td class="act"><button class="btn s r" data-act="drive-del" data-id="${esc(f.id)}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mut">Nothing uploaded yet — attach a bill from the Expenses form.</p>'}</div>
+  <div class="card"><h2>My data</h2>
+    <p class="mut">A copy of <b>${esc(S.profile ? S.profile.name : 'this book')}</b> only — the book you are looking at, not the other books or another member's data. Both files land in your Downloads folder and open without a network connection.</p>
+    <div class="tools" style="flex-wrap:wrap">
+      <button class="btn" data-act="backup-plain">Download JSON</button>
+      <button class="btn g" data-act="download-csv">Download CSV</button>
+    </div>
+    <p class="hint mut">JSON keeps every field exactly as stored. CSV puts every record in one sheet with a <code>collection</code> and <code>id</code> column, so it opens in Excel or Sheets.</p>
+    <div class="mrow" style="margin-top:12px"><span>Android app</span><b>${S.release && S.release.apkUrl ? `v${esc(S.release.version || '')}` : 'not published'}</b></div>
+    ${S.release && S.release.apkUrl
+      ? `<a class="btn g" href="${esc(S.release.apkUrl)}" download>Download Android app</a>
+         <p class="hint mut" style="word-break:break-all">SHA-256 <code>${esc(S.release.apkSha256 || 'not recorded')}</code></p>`
+      : '<p class="hint mut">The owner has not published an APK yet.</p>'}
+    <div class="tools" style="margin-top:12px"><button class="btn g" data-act="sample-data">Load sample data</button>
+      <button class="btn r" data-act="clear-data">Clear all data</button></div>
     <p class="hint mut" style="margin-top:8px">Clearing removes every contact, bill, expense, policy, task and document for all books. Accounts and settings stay.</p></div>
-
-  <div class="card"><h2>Security audit</h2>
-    <p class="mut">Sign-ins, failed sign-ins, profile switches, sharing and role changes, exports and deletions, newest first. No financial values or keys are recorded here.</p>
-    <div class="tw"><table><thead><tr><th>When</th><th>Action</th><th>Who</th><th>Target</th></tr></thead><tbody>${(S.audit || [])
-      .map(
-        (e) => `<tr><td class="mut">${esc(relative(e.ts))}</td><td>${esc(e.action)}</td><td>${esc(e.actor_name || 'system')}</td><td class="mut">${esc(e.target || e.detail || '')}</td></tr>`,
-      )
-      .join('') || '<tr><td colspan="4" class="mut">No audit events yet</td></tr>'}</tbody></table></div>
-  </div>
-
   <div class="card"><h2>Recent changes</h2><div class="tw"><table><thead><tr><th>Record</th><th>Module</th><th>Action</th><th>When</th></tr></thead><tbody>${activityRows}</tbody></table></div></div>
-
-  <div class="card"><h2>About</h2><p class="mut">Family Finance Planner · ${(S.db.contacts || []).length.toLocaleString('en-IN')} contacts, ${(S.db.payments || []).length} bills, ${(S.db.loans || []).length} loans, ${(S.db.insurance || []).length} policies, ${(S.db.diary || []).length} diary entries. Signed in as ${esc(S.me.name || 'family')}. Realtime sync is ${S.sync === 'live' ? 'connected' : 'reconnecting'}.</p></div>`;
+  <h2 class="grouphead">About</h2>
+  <div class="card"><h2>About</h2>
+    <div class="mrow"><span>Version</span><b>${esc(S.release && S.release.version ? S.release.version : S.account.version || '')}</b></div>
+    <div class="mrow"><span>Sync</span><b>${S.sync === 'live' ? 'Connected' : 'Reconnecting'}</b></div>
+    <p class="mut">Family Finance Planner · ${(S.db.contacts || []).length.toLocaleString('en-IN')} contacts, ${(S.db.payments || []).length} bills, ${(S.db.loans || []).length} loans, ${(S.db.insurance || []).length} policies, ${(S.db.diary || []).length} diary entries. Signed in as ${esc(S.me.name || 'family')}.</p>
+    <div class="tools"><button class="btn g" data-act="push-settings">Notification settings</button>
+      <button class="btn g" data-act="help">Help</button></div></div>
+`;
 }
 
 function relative(ts) {
@@ -676,11 +680,7 @@ export function notificationsPanelHtml() {
   return `<div class="bellpanel" data-stop="1">
     <div class="bellhead"><b>Notifications</b><button class="btn s g" data-act="note-read">Mark all read</button></div>
     <div class="bellbody">${items.length
-      ? items.map((n) => {
-          const text = notificationMessage(n);
-          const wa = whatsappLink(S.settings.mobile, text);
-          return `<div class="note ${n.read_at ? '' : 'unread'} lvl-${esc(n.level || 'info')}"><div class="ntitle">${esc(n.title)}</div><div class="nbody">${esc(n.body)}</div><div class="ntime mut">${esc(relative(n.created_at))}</div><div class="noteacts">${wa ? `<a class="btn s wa" target="_blank" rel="noopener" href="${esc(wa)}">WhatsApp</a>` : ''}<a class="btn s g" href="${esc(smsLink(S.settings.mobile, text))}">SMS</a></div></div>`;
-        }).join('')
+      ? items.map((n) => `<div class="note ${n.read_at ? '' : 'unread'} lvl-${esc(n.level || 'info')}"><div class="ntitle">${esc(n.title)}</div><div class="nbody">${esc(n.body)}</div><div class="ntime mut">${esc(relative(n.created_at))}</div></div>`).join('')
       : '<div class="mut" style="padding:12px">No notifications yet.</div>'}</div>
     <div class="bellfoot"><button class="btn g" data-act="push-settings">Notification settings</button></div></div>`;
 }
@@ -697,7 +697,6 @@ export function initials(name) {
 }
 
 function memberCard(m) {
-  const wa = whatsappLink(m.mobile, recordMessage('family', m));
   const bday = bdayNext(m);
   return `<div class="member">
     <div class="memberhead"><span class="avatar big">${esc(initials(m.name))}</span>
@@ -712,7 +711,6 @@ function memberCard(m) {
     ${m.notes ? `<div class="mnotes mut">${esc(m.notes)}</div>` : ''}
     <div class="memberlinks">
       ${m.mobile ? `<a class="btn s g" href="tel:${esc(String(m.mobile).replace(/\s/g, ''))}">Call</a>` : ''}
-      ${wa ? `<a class="btn s wa" target="_blank" rel="noopener" href="${esc(wa)}">WhatsApp</a>` : ''}
       <button class="btn s g" data-act="edit" data-ek="family" data-id="${esc(m.id)}">Edit</button>
       <button class="btn s r" data-act="del" data-ek="family" data-id="${esc(m.id)}">✕</button>
     </div>
