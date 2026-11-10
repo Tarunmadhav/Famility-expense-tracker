@@ -1,0 +1,160 @@
+// Cloud backup quick-connect.
+//
+// The provider is stubbed (no real Google or Microsoft account is touched); what is
+// checked is the wiring the credentials turn on: the consent URL, the state, the
+// code exchange, the sealed refresh token, and the round trip back into the app.
+
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import { applyMigrations } from '../src/migrations/runner.js';
+import { startConnect } from '../src/cloud.js';
+import worker from '../src/worker.js';
+import { makeDatabase } from './helpers/d1.mjs';
+
+const ORIGIN = 'http://localhost:8787';
+// 32 bytes, base64url — the shape BACKUP_KEY must have.
+const BACKUP_KEY = '3xkHIItGG0-ExLXWjow78iOAAHZOZimTarK7FuYMpy0';
+
+async function call(env, path, { method = 'GET', body, cookie, redirect = 'manual' } = {}) {
+  const headers = { Origin: ORIGIN };
+  if (body) headers['Content-Type'] = 'application/json';
+  if (cookie) headers.Cookie = cookie;
+  const res = await worker.fetch(
+    new Request(`${ORIGIN}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, redirect }),
+    env,
+    { waitUntil() {} },
+  );
+  const text = await res.text();
+  let data = text;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    /* html or empty */
+  }
+  return { status: res.status, data, text, cookie: res.headers.get('set-cookie'), location: res.headers.get('Location') };
+}
+
+async function setup(env0 = {}) {
+  const { db, env } = makeDatabase();
+  env.APP_VERSION = 'test';
+  Object.assign(env, {
+    BACKUP_KEY,
+    GOOGLE_CLIENT_ID: 'test-client-id',
+    GOOGLE_CLIENT_SECRET: 'test-client-secret',
+    ...env0,
+  });
+  await applyMigrations(env);
+  const signup = await call(env, '/api/auth/signup', {
+    method: 'POST',
+    body: { email: 'owner@example.com', password: 'Password123', name: 'Owner' },
+  });
+  const cookie = String(signup.cookie).match(/ffp_session=[^;]+/)[0];
+  const userId = db.prepare(`SELECT id FROM users`).get().id;
+  return { db, env, cookie, userId };
+}
+
+test('an unconfigured deployment says which secret is missing and offers no connect', async () => {
+  const { env, cookie } = await setup({ GOOGLE_CLIENT_ID: '', GOOGLE_CLIENT_SECRET: '' });
+  const state = await call(env, '/api/cloud', { cookie });
+  const google = state.data.providers.find((p) => p.id === 'google');
+  assert.equal(google.configured, false);
+
+  const link = await call(env, '/api/cloud/link', { method: 'POST', cookie, body: { provider: 'google' } });
+  assert.equal(link.status, 501);
+  assert.match(link.data.error, /GOOGLE_CLIENT_ID/);
+  assert.ok(!link.data.url, 'an unconfigured provider produced a consent URL');
+});
+
+test('connecting with credentials produces one consent URL with PKCE and state', async () => {
+  const { env, cookie } = await setup();
+  const link = await call(env, '/api/cloud/link', { method: 'POST', cookie, body: { provider: 'google' } });
+  assert.equal(link.status, 200, JSON.stringify(link.data));
+  const url = new URL(link.data.url);
+  assert.equal(url.origin + url.pathname, 'https://accounts.google.com/o/oauth2/v2/auth');
+  assert.equal(url.searchParams.get('client_id'), 'test-client-id');
+  assert.equal(url.searchParams.get('redirect_uri'), `${ORIGIN}/api/cloud/callback/google`);
+  assert.match(url.searchParams.get('scope'), /drive\.appdata/);
+  assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
+  assert.ok(url.searchParams.get('code_challenge'));
+  assert.ok(url.searchParams.get('state'));
+  // Refresh tokens only arrive with offline access, and Google only reissues them
+  // when consent is prompted again.
+  assert.equal(url.searchParams.get('access_type'), 'offline');
+  assert.equal(url.searchParams.get('prompt'), 'consent');
+
+  // Each attempt gets its own state, so two tabs cannot overwrite each other.
+  const second = await call(env, '/api/cloud/link', { method: 'POST', cookie, body: { provider: 'google' } });
+  assert.notEqual(new URL(second.data.url).searchParams.get('state'), url.searchParams.get('state'));
+});
+
+test('the callback comes back to the app root, not a 404 path', async () => {
+  const { env, cookie } = await setup();
+  // Denied consent is the cheapest path through the callback.
+  const res = await call(env, '/api/cloud/callback/google?error=access_denied', { cookie });
+  assert.equal(res.status, 302);
+  const back = new URL(res.location);
+  assert.equal(back.pathname, '/', 'the browser would land on a path the Worker does not serve');
+  assert.equal(back.searchParams.get('cloud'), 'denied');
+  assert.equal(back.searchParams.get('tab'), 'settings');
+});
+
+test('a code exchange stores a sealed refresh token and the provider never sees it', async () => {
+  const { db, env, cookie, userId } = await setup();
+  const linked = await startConnect(env, 'google', userId, `${ORIGIN}/api/cloud/callback/google`);
+
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-secret', expires_in: 3600, token_type: 'Bearer' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  };
+  try {
+    const res = await call(
+      env,
+      `/api/cloud/callback/google?code=code-1&state=${encodeURIComponent(linked.state)}`,
+      { cookie },
+    );
+    assert.equal(res.status, 302);
+    assert.equal(new URL(res.location).searchParams.get('cloud'), 'connected');
+    assert.equal(calls.length, 1);
+    const sent = String(calls[0].init.body);
+    assert.match(sent, /code_verifier=/, 'PKCE verifier was not sent');
+    assert.match(sent, /grant_type=authorization_code/);
+
+    const row = db.prepare(`SELECT refresh_token FROM cloud_links WHERE provider = 'google'`).get();
+    assert.ok(row, 'no connection row was written');
+    assert.ok(!row.refresh_token.includes('rt-secret'), 'the refresh token was stored in clear text');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // The state is single use: replaying it must not link again.
+  const replay = await call(
+    env,
+    `/api/cloud/callback/google?code=code-1&state=${encodeURIComponent(linked.state)}`,
+    { cookie },
+  );
+  assert.equal(new URL(replay.location).searchParams.get('cloud'), 'failed');
+});
+
+test('another account cannot complete a connection with a stolen state', async () => {
+  const { env, cookie } = await setup();
+  const linked = await startConnect(env, 'google', 'some-other-user', `${ORIGIN}/api/cloud/callback/google`);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 3600 }), { status: 200 });
+  try {
+    const res = await call(
+      env,
+      `/api/cloud/callback/google?code=c&state=${encodeURIComponent(linked.state)}`,
+      { cookie },
+    );
+    assert.equal(new URL(res.location).searchParams.get('cloud'), 'failed');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

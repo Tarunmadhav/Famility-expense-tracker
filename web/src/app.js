@@ -64,6 +64,8 @@ S.authEmail = '';
 S.authProviders = [];
 let events = null;
 let pollTimer = null;
+// Set when a redirect brings the user back to a particular screen (drive connect).
+let bootTab = '';
 let deferredPrompt = null;
 let lastActive = Date.now();
 
@@ -262,7 +264,13 @@ async function boot() {
       toast('That account has no confirmed email address, so it cannot be linked to a planner. Confirm the address and try again.');
     }
     if (signin === 'denied') toast('Sign-in was cancelled in the browser.');
-    if (signin) window.history.replaceState({}, '', window.location.pathname);
+    // The drive connect flow comes back from the provider with a short status flag.
+    const cloud = params.get('cloud');
+    if (cloud === 'connected') toast('Drive connected — back up or restore from Settings');
+    if (cloud === 'denied') toast('The drive connection was cancelled');
+    if (cloud === 'failed') toast('That drive could not be connected. Try again from Settings.');
+    bootTab = params.get('tab') === 'settings' ? 'settings' : '';
+    if (signin || cloud || params.get('tab')) window.history.replaceState({}, '', window.location.pathname);
   } catch {
     /* no history support */
   }
@@ -316,11 +324,19 @@ async function loadApp() {
   // the service worker, the inbox is another request, and the announcement is a
   // text update. None of it may hold up the first frame.
   const after = (fn) => (window.requestIdleCallback ? window.requestIdleCallback(fn) : setTimeout(fn, 200));
-  after(() => {
+  after(async () => {
     detectPush().catch(() => {});
     checkPendingNotifications(true).catch(() => {});
     announceProfile();
     ctxSafeLoadInbox();
+    // A redirect (drive connect) asks for a screen; do it after the first frame.
+    const wanted = bootTab;
+    bootTab = '';
+    if (wanted) {
+      S.tab = wanted;
+      if (wanted === 'settings') await loadSettingsData().catch(() => {});
+      render();
+    }
   });
 }
 

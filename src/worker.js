@@ -1285,7 +1285,10 @@ async function handleApi(request, env, ctx, url) {
   const cloudCallback = path.match(/^\/api\/cloud\/callback\/([a-z]{1,20})$/);
   if (cloudCallback && method === 'GET') {
     const provider = cloudCallback[1];
-    const back = new URL('/settings', url.origin);
+    // Back to the app root, not /settings: the server only serves the shell at /,
+    // so the old target answered 404 and a finished connection looked like a crash.
+    const back = new URL('/', url.origin);
+    back.searchParams.set('tab', 'settings');
     if (url.searchParams.get('error')) {
       back.searchParams.set('cloud', 'denied');
       return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
