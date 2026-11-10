@@ -322,7 +322,7 @@ const AUDIT_ACTIONS = new Set([
   'auth.recovery_code',
   'auth.2fa',
   'auth.otp',
-  'auth.whatsapp',
+  'auth.telegram',
   'profile.switch',
   'profile.create',
   'profile.role',

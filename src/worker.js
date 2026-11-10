@@ -64,8 +64,6 @@ import {
   beginTotp,
   consumeEmailOtp,
   createEmailOtp,
-  createWhatsappCode,
-  markWhatsappMessage,
   createRecoveryCode,
   disableTotp,
   resolveOauthAccount,
@@ -85,15 +83,6 @@ import { CLOUD_PROVIDER_IDS, cloudLink, restoreExport, runBackup, runScheduledBa
 import { calendarFeed, calendarToken } from './calendarfeed.js';
 import { emailConfigured, sendOtpEmail } from './email.js';
 import {
-  handleMessage,
-  parseWebhook,
-  sendWhatsapp,
-  verifySignature,
-  whatsappConfigured,
-  whatsappMessagingConfigured,
-  whatsappMessagingMissing,
-} from './whatsapp.js';
-import {
   consumeLoginTicket,
   exchangeCode,
   fetchIdentity,
@@ -102,8 +91,21 @@ import {
   signInProviders,
   startAuthorization,
 } from './oauth.js';
+import {
+  assertTelegramConfigured,
+  createLinkCode,
+  deliverPending,
+  handleUpdate,
+  linkForUser,
+  sendMessage,
+  setPreview,
+  telegramConfigured,
+  telegramMissing,
+  telegramWebhookConfigured,
+  unlinkTelegram,
+  webhookSecretOk,
+} from './telegram.js';
 import { ICONS } from './icons.js';
-import { normaliseMobile } from './phone.js';
 import {
   ROLE_LABEL,
   audit,
@@ -160,10 +162,16 @@ export default {
   /** Cron Trigger: only accounts with automatic backup on are touched. */
   async scheduled(event, env, ctx) {
     if (!env.DB) return;
+    const now = event && event.scheduledTime ? event.scheduledTime : Date.now();
     ctx.waitUntil(
-      runScheduledBackups(env, { now: event && event.scheduledTime ? event.scheduledTime : Date.now() }).catch((err) =>
+      runScheduledBackups(env, { now }).catch((err) =>
         console.error('scheduled backup run failed', err && err.message),
       ),
+    );
+    // A queued alert that failed while the isolate was busy gets another chance
+    // here, without a request having to happen first.
+    ctx.waitUntil(
+      deliverPending(env, { now }).catch((err) => console.error('telegram drain failed', err && err.message)),
     );
   },
 
@@ -417,7 +425,7 @@ function permissionFor(method, path) {
   if (path === '/api/notifications/all') return null;
   if (path.startsWith('/api/profiles')) return null;
   if (path.startsWith('/api/cloud')) return null;
-  if (path.startsWith('/api/whatsapp')) return null;
+  if (path.startsWith('/api/telegram')) return null;
   // The .ics feed authenticates by its token, and the two management routes are
   // ordinary session routes below.
   if (/^\/api\/calendar\/[0-9a-f]{48}\.ics$/.test(path)) return null;
@@ -887,55 +895,47 @@ async function handleApi(request, env, ctx, url) {
     });
   }
 
-  /* ------------------------------------------------------ whatsapp webhook */
-
-  // Meta calls these two with no session and no Origin header; the request is
-  // authenticated by the HMAC signature instead, so they sit ahead of requireUser.
-  if (path === '/api/whatsapp/webhook' && method === 'GET') {
-    const mode = url.searchParams.get('hub.mode');
-    const token = url.searchParams.get('hub.verify_token') || '';
-    const challenge = url.searchParams.get('hub.challenge') || '';
-    const expected = String(env.WHATSAPP_VERIFY_TOKEN || '').trim();
-    if (!expected) {
-      return json({ error: 'WhatsApp is not configured (WHATSAPP_VERIFY_TOKEN).' }, 501);
+  // Telegram posts updates here. They carry no session and no Origin header, so
+  // the request is authenticated by the secret token Telegram echoes back. An
+  // update is acknowledged with 200 once handled: a non-2xx makes Telegram retry,
+  // and the update id is recorded so a retry is not acted on twice.
+  if (path === '/api/telegram/webhook' && method === 'POST') {
+    if (!telegramWebhookConfigured(env)) {
+      return json({ error: 'Telegram is not configured (TELEGRAM_WEBHOOK_SECRET).' }, 501);
     }
-    if (mode !== 'subscribe' || !constantTimeEqual(token, expected)) {
-      return json({ error: 'Verification failed' }, 403);
+    if (!webhookSecretOk(env, request.headers.get('X-Telegram-Bot-Api-Secret-Token'))) {
+      return json({ error: 'Bad webhook secret' }, 401);
     }
-    return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } });
-  }
-
-  if (path === '/api/whatsapp/webhook' && method === 'POST') {
     const raw = await request.text();
-    if (raw.length > 200_000) return json({ error: 'Body too large' }, 413);
-    if (!String(env.WHATSAPP_APP_SECRET || '').trim()) {
-      return json({ error: 'WhatsApp is not configured (WHATSAPP_APP_SECRET).' }, 501);
-    }
-    if (!(await verifySignature(env, raw, request.headers.get('X-Hub-Signature-256')))) {
-      return json({ error: 'Bad signature' }, 401);
-    }
-    let payload;
+    if (raw.length > 100_000) return json({ error: 'Body too large' }, 413);
+    let update;
     try {
-      payload = JSON.parse(raw || '{}');
+      update = JSON.parse(raw || '{}');
     } catch {
       return json({ error: 'Invalid JSON body' }, 400);
     }
-    // Answer 200 even when a command fails: a non-2xx makes Meta retry the same
-    // message, and a retried write must never be applied twice.
-    for (const message of parseWebhook(payload).slice(0, 10)) {
-      try {
-        if (!(await markWhatsappMessage(env, message.id))) continue;
-        if (await hitRateLimit(env, `wa:${message.from}`, 60, 3600_000)) {
-          await sendWhatsapp(env, message.from, 'You are sending commands faster than I can handle. Try again in a little while.');
-          continue;
-        }
-        const reply = await handleMessage(env, message.from, message.text);
-        if (reply) await sendWhatsapp(env, message.from, reply);
-      } catch (err) {
-        const message_ = err && err.message ? String(err.message) : 'Something went wrong';
-        console.error('whatsapp command failed', message_.slice(0, 200));
-        await sendWhatsapp(env, message.from, message_);
-      }
+    const updateId = String(update && update.update_id != null ? update.update_id : '');
+    if (updateId) {
+      const first = await env.DB.prepare(`INSERT OR IGNORE INTO telegram_updates (id, at) VALUES (?, ?)`)
+        .bind(updateId, Date.now())
+        .run();
+      if (!((first.meta && first.meta.changes) || 0)) return json({ ok: true, duplicate: true });
+    }
+    const from = String((update && update.message && update.message.from && update.message.from.id) || '');
+    if (from && (await hitRateLimit(env, `tg:${from}`, 30, 60_000))) {
+      return json({ ok: true, throttled: true });
+    }
+    let reply = '';
+    try {
+      reply = await handleUpdate(env, update);
+    } catch (err) {
+      console.error('telegram update failed', err && err.message ? String(err.message).slice(0, 200) : 'unknown');
+      reply = 'Something went wrong. Try again in a moment.';
+    }
+    // Best effort: a send failure must not turn into a Telegram retry loop.
+    if (reply) {
+      const chatId = update && update.message && update.message.chat && update.message.chat.id;
+      if (chatId) await sendMessage(env, chatId, reply).catch(() => {});
     }
     return json({ ok: true });
   }
@@ -1153,44 +1153,48 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true });
   }
 
-  /* --------------------------------------------------------- whatsapp link */
+  /* ----------------------------------------------------------- telegram */
 
-  if (path === '/api/whatsapp' && method === 'GET') {
-    const link = await env.DB.prepare(`SELECT phone, profile, created_at FROM whatsapp_links WHERE user_id = ?`)
-      .bind(session.userId)
-      .all();
-    const rows = link.results || [];
+  if (path === '/api/telegram' && method === 'GET') {
+    const link = await linkForUser(env, session.userId);
     return json({
-      configured: whatsappConfigured(env),
-      // Proactive notifications need a flag, credentials and an approved template;
-      // the app shows exactly what is missing instead of a vague failure.
-      messaging: {
-        configured: whatsappMessagingConfigured(env),
-        missing: whatsappMessagingMissing(env),
-      },
-      // The business number, when the owner set one, so the app can open a chat
-      // with the link code already typed in.
-      number: String(env.WHATSAPP_DISPLAY_NUMBER || '').replace(/\D/g, ''),
-      links: rows.map((r) => ({
-        phone: `••••${String(r.phone).slice(-4)}`,
-        profile: r.profile,
-        linkedAt: r.created_at,
-      })),
+      configured: telegramConfigured(env),
+      // The app shows exactly which secret the owner still has to add.
+      missing: telegramMissing(env),
+      link: link
+        ? {
+            username: link.username,
+            // The numeric id is shown so a person can recognise the chat, never
+            // to be typed back in as proof of anything.
+            telegramUserId: String(link.telegram_user_id).replace(/^(.{2}).*(.{2})$/, '$1•••$2'),
+            preview: link.preview,
+            linkedAt: link.created_at,
+            blocked: Boolean(link.blocked_at),
+          }
+        : null,
     });
   }
 
-  if (path === '/api/whatsapp/link' && method === 'POST') {
-    const body = await readJson(request);
-    const target = await resolveProfile(env, session, String(body.profile || ''), 'view');
-    const out = await createWhatsappCode(env, session.userId, target.id);
-    await audit(env, { action: 'auth.whatsapp', actor: session.userId, profileId: target.id, detail: 'code' });
-    return json({ ok: true, code: out.code, minutes: out.minutes });
+  if (path === '/api/telegram/link' && method === 'POST') {
+    assertTelegramConfigured(env);
+    const out = await createLinkCode(env, session.userId);
+    await audit(env, { action: 'auth.telegram', actor: session.userId, detail: 'code' });
+    // The code is not stored anywhere in readable form, so this response is the
+    // only copy: it must never be cached or logged.
+    return json({ ok: true, code: out.code, minutes: out.minutes }, 200, { 'Cache-Control': 'no-store' });
   }
 
-  if (path === '/api/whatsapp/link' && method === 'DELETE') {
-    await env.DB.prepare(`DELETE FROM whatsapp_links WHERE user_id = ?`).bind(session.userId).run();
-    await audit(env, { action: 'auth.whatsapp', actor: session.userId, detail: 'unlink' });
-    return json({ ok: true });
+  if (path === '/api/telegram/unlink' && method === 'POST') {
+    const had = await unlinkTelegram(env, session.userId);
+    await audit(env, { action: 'auth.telegram', actor: session.userId, detail: 'unlink' });
+    return json({ ok: true, unlinked: had });
+  }
+
+  if (path === '/api/telegram/prefs' && method === 'POST') {
+    const body = await readJson(request);
+    const preview = await setPreview(env, session.userId, String(body.preview || ''));
+    await audit(env, { action: 'auth.telegram', actor: session.userId, detail: `preview:${preview}` });
+    return json({ ok: true, preview });
   }
 
   /* -------------------------------------------------- cloud backup */
@@ -1440,19 +1444,7 @@ async function handleApi(request, env, ctx, url) {
 
   if (path === '/api/settings' && method === 'POST') {
     const body = await readJson(request);
-    // Stored as E.164 so WhatsApp/SMS links and the Cloud API call cannot point at
-    // a half-typed number. An empty value is allowed: it means "alerts are off".
-    const mobile = normaliseMobile(String(body.mobile || '').slice(0, 40));
-    if (!mobile.ok) {
-      throw new HttpError(
-        400,
-        mobile.reason === 'missing-country-code'
-          ? 'Enter the number with its country code, for example +91 98765 43210'
-          : 'That is not a valid phone number — use the country code and 8 to 15 digits',
-      );
-    }
     const clean = {
-      mobile: mobile.number,
       alertTime: /^\d{2}:\d{2}$/.test(String(body.alertTime || '')) ? body.alertTime : '06:00',
       channel: String(body.channel || '').slice(0, 80),
       currency: 'INR',
@@ -1824,6 +1816,11 @@ async function runBackground(env) {
     await pruneChanges(env);
   } catch {
     /* background maintenance must never break a request */
+  }
+  try {
+    await deliverPending(env);
+  } catch {
+    /* a queued Telegram alert is retried by the next drain or the cron */
   }
 }
 

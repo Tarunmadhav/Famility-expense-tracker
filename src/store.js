@@ -9,6 +9,7 @@ import { HttpError } from './errors.js';
 import { ensureProfiles, spaceForProfile } from './profiles.js';
 import { matchTotp, newRecoveryCode, normaliseRecoveryCode, otpauthUri, randomBase32 } from './twofactor.js';
 import { applyMigrations, pendingMigrations } from './migrations/runner.js';
+import { queueNotification } from './telegram.js';
 
 export const SCHEMA_VERSION = '13';
 // 100 000 is the maximum iteration count the production Workers runtime supports
@@ -398,109 +399,6 @@ export async function consumeEmailOtp(env, email, code) {
   }
   await env.DB.prepare(`DELETE FROM email_otps WHERE email = ?`).bind(clean).run();
   return true;
-}
-
-/* ------------------------------------------------------------ whatsapp chat */
-
-/**
- * A number may only reach a book after it was linked from a signed-in session. The
- * code is short because it is typed into WhatsApp by hand, so it expires in ten
- * minutes, is single-use, and is scoped to the account that created it.
- */
-export async function createWhatsappCode(env, userId, profile) {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  let code = '';
-  for (let i = 0; i < 8; i += 1) code += alphabet[bytes[i] % alphabet.length];
-  await env.DB.prepare(`DELETE FROM whatsapp_codes WHERE user_id = ?`).bind(String(userId)).run();
-  await env.DB.prepare(
-    `INSERT INTO whatsapp_codes (code, user_id, profile, expires_at) VALUES (?, ?, ?, ?)`,
-  )
-    .bind(code, String(userId), String(profile || ''), Date.now() + 10 * 60_000)
-    .run();
-  return { code, minutes: 10 };
-}
-
-/** Redeem a code for a phone number. Returns null unless the code is live. */
-export async function consumeWhatsappCode(env, code, phone) {
-  const clean = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (!clean || !digits) return null;
-  const row = await env.DB.prepare(`SELECT * FROM whatsapp_codes WHERE code = ?`).bind(clean).first();
-  if (!row) return null;
-  await env.DB.prepare(`DELETE FROM whatsapp_codes WHERE code = ?`).bind(clean).run();
-  if (Number(row.expires_at) < Date.now()) return null;
-  await env.DB.prepare(
-    `INSERT INTO whatsapp_links (phone, user_id, profile, created_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT(phone) DO UPDATE SET user_id = excluded.user_id, profile = excluded.profile,
-       created_at = excluded.created_at`,
-  )
-    .bind(digits, row.user_id, row.profile || '', Date.now())
-    .run();
-  return { userId: row.user_id, profile: row.profile || '' };
-}
-
-/**
- * Meta retries a delivery when it does not get a quick 200, and a retried "add
- * expense 250 groceries" must not create a second row. Returns false for a message
- * that was already handled.
- */
-export async function markWhatsappMessage(env, id) {
-  const key = String(id || '').slice(0, 80);
-  if (!key) return true;
-  const res = await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_seen (id, at) VALUES (?, ?)`)
-    .bind(key, Date.now())
-    .run();
-  const changed = (res.meta && res.meta.changes) || 0;
-  if (changed > 0) {
-    await env.DB.prepare(`DELETE FROM whatsapp_seen WHERE at < ?`).bind(Date.now() - 7 * 86400_000).run();
-  }
-  return changed > 0;
-}
-
-export async function whatsappLink(env, phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (!digits) return null;
-  return env.DB.prepare(`SELECT * FROM whatsapp_links WHERE phone = ?`).bind(digits).first();
-}
-
-export async function setWhatsappProfile(env, phone, profile) {
-  await env.DB.prepare(`UPDATE whatsapp_links SET profile = ? WHERE phone = ?`)
-    .bind(String(profile || ''), String(phone).replace(/\D/g, ''))
-    .run();
-}
-
-export async function unlinkWhatsapp(env, phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  await env.DB.batch([
-    env.DB.prepare(`DELETE FROM whatsapp_links WHERE phone = ?`).bind(digits),
-    env.DB.prepare(`DELETE FROM whatsapp_state WHERE phone = ?`).bind(digits),
-  ]);
-}
-
-/** Remember the last list a chat was shown, so "done 2" refers to what was read. */
-export async function setWhatsappState(env, phone, collection, ids) {
-  await env.DB.prepare(
-    `INSERT INTO whatsapp_state (phone, collection, ids, updated_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT(phone) DO UPDATE SET collection = excluded.collection, ids = excluded.ids,
-       updated_at = excluded.updated_at`,
-  )
-    .bind(String(phone).replace(/\D/g, ''), String(collection), JSON.stringify(ids.slice(0, 20)), Date.now())
-    .run();
-}
-
-export async function whatsappState(env, phone) {
-  const row = await env.DB.prepare(`SELECT collection, ids, updated_at FROM whatsapp_state WHERE phone = ?`)
-    .bind(String(phone).replace(/\D/g, ''))
-    .first();
-  if (!row) return null;
-  let ids = [];
-  try {
-    ids = JSON.parse(row.ids || '[]');
-  } catch {
-    ids = [];
-  }
-  return { collection: row.collection, ids: Array.isArray(ids) ? ids : [] };
 }
 
 /* ------------------------------------------------------------- social login */
@@ -1406,6 +1304,9 @@ export async function addNotification(env, n) {
   const created = res.meta && res.meta.changes > 0;
   if (!created) return null;
   await logChange(env, space, 'notifications', id, 'notify', 'system');
+  // Queued, not sent: the Telegram call happens in the background drain so a
+  // slow or rate-limited bot cannot delay the write that raised the alert.
+  await queueNotification(env, { id, space }).catch(() => {});
   return {
     id,
     space,

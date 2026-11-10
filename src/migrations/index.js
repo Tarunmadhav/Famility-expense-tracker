@@ -389,4 +389,106 @@ export const MIGRATIONS = [
       }
     },
   },
+  {
+    id: '0006_drop_whatsapp',
+    name: 'remove the WhatsApp tables',
+    // WhatsApp was removed from the product, so these four tables have no reader
+    // and no writer left. They never held financial data — a link was a phone
+    // number plus the account it reached, whatsapp_codes was a 10-minute link
+    // code, whatsapp_state remembered the last list a chat was shown, and
+    // whatsapp_seen deduplicated Meta's retries. Dropping them removes the phone
+    // numbers instead of keeping a contact list nothing uses.
+    //
+    // The WhatsApp number that used to live in `settings:<profile>.mobile` is
+    // left in place: it is inside a JSON document shared with the household name
+    // and alert time, and rewriting that document to strip one key would risk
+    // the rest of the settings. No route reads it any more (verified with grep
+    // before the change), so it is inert rather than exposed.
+    statements: [
+      `DROP TABLE IF EXISTS whatsapp_links`,
+      `DROP TABLE IF EXISTS whatsapp_codes`,
+      `DROP TABLE IF EXISTS whatsapp_state`,
+      `DROP TABLE IF EXISTS whatsapp_seen`,
+    ],
+  },
+  {
+    id: '0007_telegram',
+    name: 'telegram links, hashed link codes and the send outbox',
+    statements: [
+      // One row per bot-to-planner link. The Telegram numeric id and the private
+      // chat id are the identity: a username or a phone number is display data
+      // that can change or be faked, so neither is ever a key.
+      `CREATE TABLE IF NOT EXISTS telegram_links (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        telegram_user_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        username TEXT,
+        preview TEXT NOT NULL DEFAULT 'generic' CHECK (preview IN ('generic', 'detailed')),
+        created_at INTEGER NOT NULL,
+        blocked_at INTEGER,
+        revoked_at INTEGER
+      )`,
+      // A planner account has at most one live Telegram identity, and a Telegram
+      // identity reaches at most one planner account. Revoked rows stay for the
+      // audit trail without blocking a fresh link.
+      `CREATE UNIQUE INDEX IF NOT EXISTS telegram_links_user_live
+         ON telegram_links (user_id) WHERE revoked_at IS NULL`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS telegram_links_identity_live
+         ON telegram_links (telegram_user_id) WHERE revoked_at IS NULL`,
+      `CREATE INDEX IF NOT EXISTS telegram_links_chat_idx ON telegram_links (chat_id)`,
+      // Only the hash of a link code is stored, next to its own salt. A dump of
+      // this table cannot be replayed as a link code, and each code is single
+      // use and expires in ten minutes.
+      `CREATE TABLE IF NOT EXISTS telegram_codes (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        code_hash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER,
+        created_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS telegram_codes_user_idx ON telegram_codes (user_id, created_at DESC)`,
+      // Telegram retries an update it did not see acknowledged, and a retried
+      // /link must not consume a second code.
+      `CREATE TABLE IF NOT EXISTS telegram_updates (
+        id TEXT PRIMARY KEY,
+        at INTEGER NOT NULL
+      )`,
+      // Notifications queue here instead of inside the write that created them:
+      // a slow or failing Telegram request must never hold up saving an expense.
+      `CREATE TABLE IF NOT EXISTS telegram_events (
+        id TEXT PRIMARY KEY,
+        space TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        processed_at INTEGER
+      )`,
+      `CREATE INDEX IF NOT EXISTS telegram_events_pending_idx ON telegram_events (processed_at, created_at)`,
+      // One row per (notification, link). The primary key is what makes a retry
+      // safe: the claim below cannot succeed twice for the same pair.
+      `CREATE TABLE IF NOT EXISTS telegram_deliveries (
+        notification_id TEXT NOT NULL,
+        link_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'sent', 'retry', 'failed', 'blocked')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_try INTEGER NOT NULL DEFAULT 0,
+        sent_at INTEGER,
+        error TEXT,
+        PRIMARY KEY (notification_id, link_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS telegram_deliveries_due_idx ON telegram_deliveries (status, next_try)`,
+    ],
+  },
+  {
+    id: '0008_drop_whatsapp_legacy',
+    name: 'drop the rollback copy of the WhatsApp link table',
+    // 0002 kept `<table>_legacy_v12` copies so a bad rebuild could be rolled back
+    // by copying rows back. That window is long closed, and this one is the only
+    // remaining table holding a phone number mapped to an account, for a feature
+    // that no longer exists. Nothing reads it; dropping it is the whole point of
+    // removing WhatsApp.
+    statements: [`DROP TABLE IF EXISTS whatsapp_links_legacy_v12`],
+  },
 ];

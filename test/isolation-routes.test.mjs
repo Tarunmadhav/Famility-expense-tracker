@@ -138,7 +138,7 @@ test('writes aimed at another book change nothing', async () => {
     ['PATCH', '/api/records', { id: alice.expenseId, collection: 'expenses', doc: { item: 'Hijacked' } }],
     ['DELETE', '/api/records', { id: alice.expenseId, collection: 'expenses' }],
     ['POST', '/api/records/bulk', { collection: 'expenses', doc: [{ item: 'bulk', cat: 'Food', amount: 1, date: '2026-11-02' }] }],
-    ['POST', '/api/settings', { mobile: '+919000000000', alertTime: '07:00', channel: 'bob' }],
+    ['POST', '/api/settings', { household: 'bob', alertTime: '07:00', channel: 'bob' }],
     ['POST', '/api/notifications', { title: 'bob', body: 'bob' }],
     ['POST', '/api/notifications/read', { id: 'x' }],
     ['POST', '/api/calendar/feed'],
@@ -152,7 +152,7 @@ test('writes aimed at another book change nothing', async () => {
   const after = (await call(env, '/api/state', { cookie: alice.cookie, profile: alice.book })).data;
   assert.equal(after.collections.expenses.length, before.collections.expenses.length, 'a row was added or removed');
   assert.equal(after.collections.expenses[0].item, `${MARK} coffee`, 'the row was edited');
-  assert.equal(after.settings.mobile, '+919876500001', 'the number was overwritten');
+  assert.equal(after.settings.household, before.settings.household, 'the settings were overwritten');
   assert.ok(!JSON.stringify(after).includes('Bobs hidden paste'));
 });
 

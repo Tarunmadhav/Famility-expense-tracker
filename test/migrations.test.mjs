@@ -87,7 +87,11 @@ test('every column the API reads exists after a fresh install', async () => {
     audit_log: ['id', 'ts', 'actor', 'profile_id', 'action', 'target', 'detail'],
     ai_connections: ['id', 'provider', 'base_url', 'model', 'api_key', 'created_by', 'created_at', 'profile_id'],
     push_subs: ['id', 'endpoint', 'p256dh', 'auth', 'created_at', 'ua', 'user_id'],
-    whatsapp_links: ['phone', 'user_id', 'profile', 'created_at'],
+    // WhatsApp was removed in 0006; these are the tables that replaced it.
+    telegram_links: ['id', 'user_id', 'telegram_user_id', 'chat_id', 'username', 'preview', 'created_at', 'blocked_at', 'revoked_at'],
+    telegram_codes: ['id', 'user_id', 'code_hash', 'salt', 'expires_at', 'used_at', 'created_at'],
+    telegram_deliveries: ['notification_id', 'link_id', 'status', 'attempts', 'next_try', 'sent_at', 'error'],
+    telegram_events: ['id', 'space', 'created_at', 'processed_at'],
   };
   for (const [table, columns] of Object.entries(required)) {
     const present = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
