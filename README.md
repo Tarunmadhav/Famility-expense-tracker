@@ -51,11 +51,11 @@ a real database, live multi-device sync, PIN-protected sessions and push notific
   Budget (income + expenses) — each with search, filters, sort, pagination, computed columns, totals,
   add/edit/delete, "mark paid/completed", CSV export, CSV template, CSV import, Google Calendar link
 * Family members: card view to add each member (relation, role, mobile, email, birthday,
-  occupation, ICE flag, notes) with call/WhatsApp shortcuts, plus a family strip on the dashboard
+  occupation, ICE flag, notes) with call shortcuts, plus a family strip on the dashboard
 * Interactivity: KPI and health cards open the matching module, alert lines jump to the record's
   module, charts carry hover tooltips, search filters as you type
-* Sharing: WhatsApp and SMS buttons prefill the alert text (dashboard digest, each notification,
-  each bill/policy/task row, each family member) — nothing is sent automatically
+* Alerts: raised by the server for bills, renewals, tasks and birthdays, shown in the app, pushed to
+  devices, and optionally delivered to a Telegram chat you link yourself
 * Utilities: contact search by name→number and number→name, India-format money/date helpers,
   `.ics` calendar export with per-event alarms, Google Contacts CSV import, JSON backup
 
@@ -167,7 +167,7 @@ readable, and if the key is missing the app keeps working in plaintext rather th
 **Encrypted backups.** Settings → Backup & restore exports only the profile you are in. The browser
 seals it with AES-256-GCM under a key derived from a passphrase you type (PBKDF2-SHA-256, 210 000
 iterations, random salt per backup). The passphrase and key never leave the device, so the file is
-readable only by someone who knows the passphrase — safe to park in Google Drive, OneDrive or a USB
+readable only by someone who knows the passphrase — safe to park in Google Drive or a USB
 stick. Restore decrypts locally, proves the file is authentic (a tampered or wrong-passphrase file
 fails the GCM check), shows the date and record count, asks for confirmation, then merges by id
 without wiping the profile first.
@@ -261,21 +261,21 @@ step of clock drift, and stores the accepted time step so a code cannot be repla
 issues a recovery code, because a lost phone must not mean a lost account. Deleting the secret requires
 a current code. Implementation: `src/twofactor.js`, `verifyTotp()` in `src/store.js`.
 
-### Google Drive / OneDrive backups
+### Google Drive backups
 
-The connector in `src/cloud.js` is complete but **inactive until the owner supplies OAuth credentials**:
+Google Drive is the only cloud provider. The client id is public and lives in `wrangler.jsonc` vars; the
+secret is a Worker secret:
 
 ```bash
-npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
-npx wrangler secret put ONEDRIVE_CLIENT_ID
-npx wrangler secret put ONEDRIVE_CLIENT_SECRET
 ```
 
-Register `<your-worker-url>/api/cloud/callback/google` (and `/onedrive`) as the redirect URI. Until then
-the API answers `501` with the missing variable name and Settings shows "Not configured", so nothing
-silently fails. Tokens are stored server-side in `cloud_links` and never sent to the browser; the app
-requests Drive's `drive.file` scope (only files it created) and OneDrive's `Files.ReadWrite.AppFolder`.
+Register `<your-worker-url>/api/cloud/callback/google` as the redirect URI, and enable the Drive API
+with the `drive.appdata` scope (an app-private folder the user cannot browse). Until both values exist
+the API answers `501` naming the missing variable and Settings shows "Owner must add credentials", so
+nothing silently fails. Tokens are sealed with `BACKUP_KEY` before they reach D1 in `cloud_links` and are
+never sent to the browser. Connecting is one tap in Settings: the button goes straight to Google and the
+callback returns to the app with the result.
 
 ### Email codes (password reset)
 
@@ -293,61 +293,39 @@ the failure is explicit. Verification is server-side (`createEmailOtp` / `consum
 new request replaces the previous code. The request endpoint always answers `ok`, so it cannot be used
 to discover which addresses have accounts.
 
-### Social sign-in (Google, Microsoft, GitHub)
+### Social sign-in (Google)
 
-Buttons appear only for providers whose credentials exist:
+Google is the only sign-in provider with credentials wired: `GOOGLE_CLIENT_ID` in `wrangler.jsonc` vars
+(shared with the Drive connector) and `GOOGLE_CLIENT_SECRET` as a Worker secret. Facebook and GitHub
+remain in `src/oauth.js` as optional providers but have no credentials, so no button appears for them.
 
-```bash
-npx wrangler secret put GOOGLE_CLIENT_ID      # shared with the Drive connector
-npx wrangler secret put GOOGLE_CLIENT_SECRET
-npx wrangler secret put ONEDRIVE_CLIENT_ID    # Microsoft sign-in
-npx wrangler secret put ONEDRIVE_CLIENT_SECRET
-npx wrangler secret put GITHUB_CLIENT_ID
-npx wrangler secret put GITHUB_CLIENT_SECRET
-```
+Redirect URI: `<worker-url>/api/auth/oauth/callback/google`. An existing email keeps its account and its
+data; a new email creates an account in its own book. The OAuth state value is single-use and expires
+after ten minutes.
 
-Redirect URI for each: `<worker-url>/api/auth/oauth/callback/<provider>`. An existing email keeps its
-account and its data; a new email creates an account in its own book. The OAuth state value is
-single-use and expires after ten minutes.
+### Telegram alerts
 
-### Text the planner from WhatsApp
-
-Once configured, a linked phone can read and change the planner from a chat:
-
-```
-summary                      spend this month, unpaid bills, open tasks
-list bills                   numbered list; "done 1" targets it
-add expense 250 groceries    free text picks the amount and the main field
-add task Pay electricity tomorrow
-add bill 1200 electricity due=2026-11-12
-edit bills 2 amount=1300 status=Paid
-delete tasks 4
-use personal                 switch which book the chat writes to
-unlink                       revoke this number
-```
-
-Any collection works the same way (`family`, `contacts`, `insurance`, `loans`,
-`subscriptions`, `budget`, `income`), and any field can be set with `key=value`.
-
-Setup, in the Meta developer console (WhatsApp → API setup):
+One bot serves every household in the deployment. A chat receives nothing until it is linked from a
+signed-in session, and every send resolves its recipients from D1 at that moment.
 
 ```bash
-npx wrangler secret put WHATSAPP_TOKEN        # permanent access token
-npx wrangler secret put WHATSAPP_PHONE_ID     # sender phone number id
-npx wrangler secret put WHATSAPP_VERIFY_TOKEN # any random string you also type in Meta
-npx wrangler secret put WHATSAPP_APP_SECRET   # App settings → Basic → App secret
+npx wrangler secret put TELEGRAM_BOT_TOKEN      # from @BotFather
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET # any random string
 ```
 
-Webhook URL: `<worker-url>/api/whatsapp/webhook`, subscribed to the `messages`
-field. Then open **Settings → WhatsApp → Create link code** and text
-`link <code>` from your phone; the code is single use and expires in 10 minutes.
+Then point the bot at the deployment, passing the same secret:
 
-Security properties: every request is verified against `X-Hub-Signature-256`
-before the body is parsed, a number has no access until it is linked from a
-signed-in session, each command re-checks profile membership and role, deliveries
-are de-duplicated by message id so a Meta retry cannot double-book an expense, and
-chats are limited to 60 commands an hour. WhatsApp itself still sees the plaintext
-messages, and the phone number is metadata the provider and the Worker both hold.
+```bash
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -d "url=https://<worker-url>/api/telegram/webhook" \
+  -d "secret_token=$TELEGRAM_WEBHOOK_SECRET"
+```
+
+Full setup, command list and the security model: [docs/TELEGRAM.md](docs/TELEGRAM.md). In short:
+`/start`, `/link CODE`, `/status`, `/settings`, `/unlink`, `/help`; a link code is single use, expires in
+ten minutes and is stored only as a hash; one Telegram identity per planner account and one account per
+identity; the webhook rejects any request whose `X-Telegram-Bot-Api-Secret-Token` does not match; the
+default alert is a generic "You have a new planner alert" and amounts are opt-in per chat.
 
 ## Local development
 
@@ -423,9 +401,9 @@ These are real, tracked gaps rather than silent omissions:
 1. **Old household data has not been migrated.** The new database is empty by design; the previous
 deployment still holds the old rows and credentials. `migration/` has the toolkit (snapshot → verify →
 import), but it needs an owner session cookie from the old site, which only you can produce.
-2. **Google Drive / OneDrive upload is not wired.** Encrypted backups download locally and can be put
-   in either service by hand. Direct upload needs OAuth client ids and secrets from Google Cloud
-   Console and Microsoft Entra, which must be created under your accounts.
+2. **Direct Drive upload needs the owner's Google OAuth client.** The client id is in
+   `wrangler.jsonc` and the secret is a Worker secret, so the connector reports `configured: false`
+   ("Owner must add credentials") until both are real. Encrypted local backups always work.
 3. **Native APK updating is advisory.** `/api/version` can advertise a new build, but serving and
    installing an APK requires a signed release hosted somewhere and `REQUEST_INSTALL_PACKAGES`; the
    shell currently tells the user an update exists and links to it.

@@ -111,8 +111,7 @@ reports `configured: false`, so the buttons stay hidden. Nothing about the flow
 depends on them, but it cannot be exercised end to end until they exist.
 
 ### F. Cloud backup has no provider credentials (blocked)
-Same shape: Google Drive (`drive.appdata`) and OneDrive
-(`Files.ReadWrite.AppFolder`) are implemented with PKCE, refresh tokens sealed by
+Same shape: Google Drive (`drive.appdata`) is implemented with PKCE, refresh tokens sealed by
 AES-256-GCM under `BACKUP_KEY`, a versioned checksummed export, an all-or-nothing
 restore, and a cron trigger that is off per account by default. The signing of
 those requests needs client ids and secrets that do not exist yet, and
@@ -141,21 +140,33 @@ They run against a live URL with the owner's PIN; CI only runs the smoke check.
   `src/migrations/` (`0001_baseline`, `0002_constraints`) with tests that apply
   the chain to an empty database and upgrade a v12 fixture without losing a row.
 - **Cloud refresh tokens were stored in clear text** and the Google scope was
-  `drive.file` (the whole drive). Now `drive.appdata` /
-  `Files.ReadWrite.AppFolder` and AES-256-GCM at rest.
+  `drive.file` (the whole drive). Now `drive.appdata` only, and AES-256-GCM at rest.
 - **Social sign-in had no PKCE and ran inside the WebView**, and linked accounts
   on provider identity alone. Rebuilt, with the rule written down.
 - **Gradle 8.13 was affected by CVE-2026-22816** (high, dependency resolution);
   upgraded to 8.14.6 and the wrapper now verifies the distribution hash.
 
+## Android App Links: the registered fingerprint is a debug key
+
+`ANDROID_SHA256` (a `wrangler.jsonc` variable) currently holds the **debug keystore**
+fingerprint of the local emulator build. A release build signs with a different key,
+so before any public release the release certificate's SHA-256 must be added to that
+variable (comma-separated) or App Links will fall back to the browser/chooser.
+
+```cmd
+keytool -list -v -keystore <release>.jks -alias <alias> | findstr SHA256
+```
+
+The same value must exist in the Google Cloud OAuth Android client if native Google
+sign-in is ever added. This is a public fact about the certificate, not a secret.
+
 ## Asking for
 
-1. Google OAuth (web client ID + secret, Android client ID, signing SHA-1,
-   redirect URIs) — sign-in and Drive backup.
-2. Facebook app ID + secret, key hash, redirect URIs.
-3. Microsoft Entra app registration (client ID, secret, redirect URIs).
+1. Google OAuth (web client ID + secret, redirect URIs) — sign-in and Drive backup;
+   the release-keystore SHA-256 for App Links.
+2. A Telegram bot token and a webhook secret (see docs/TELEGRAM.md).
+3. An email provider (Resend/SendGrid/SMTP) and its API key, plus a verified sender.
 4. Permission to generate a new Android release keystore and store it as a
    secret, accepting that existing installs must be reinstalled once.
-5. An email provider (Resend/SendGrid/SMTP) and its API key.
-6. Product decisions: Apple sign-in, multiple owners per household, whether
-   linked logins share one book, and backup frequency/retention.
+5. Product decisions: multiple owners per household, whether linked logins share
+   one book, and backup frequency/retention.

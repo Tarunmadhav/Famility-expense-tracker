@@ -1,7 +1,7 @@
 # Cloud backup
 
-Backups go to the user's own Google Drive or OneDrive, into an app-private folder,
-as versioned JSON. Two providers, deliberately no others: each one needs its own
+Backups go to the user's own Google Drive, into an app-private folder,
+as versioned JSON. One provider, deliberately no others: each one needs its own
 OAuth app, scopes and review, and an unverified third is a liability rather than a
 feature.
 
@@ -52,8 +52,7 @@ wipe.
 
 | Secret | Purpose |
 | --- | --- |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google sign-in and Drive (`drive.appdata`) |
-| `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` | Microsoft sign-in and OneDrive (`Files.ReadWrite.AppFolder`) |
+| `GOOGLE_CLIENT_ID` (var), `GOOGLE_CLIENT_SECRET` (secret) | Google sign-in and Drive (`drive.appdata`) |
 | `BACKUP_KEY` | 32 bytes, base64url — AES-256-GCM key for the stored refresh tokens |
 
 Generate the key with `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='` and set
@@ -66,9 +65,11 @@ additional data `ffp-cloud-refresh-token`. A token sealed with a different key
 fails to open and the connection is reported as needing a reconnect — it is never
 silently used.
 
-Scopes are the narrowest that still allow a file: Google's `drive.appdata` is a
-folder the user cannot browse, and Microsoft's `Files.ReadWrite.AppFolder` is the
-same idea. A stolen token cannot read the rest of the drive.
+The scope is the narrowest that still allows a file: Google's `drive.appdata` is a
+folder the user cannot browse. A stolen token cannot read the rest of the drive.
+Google is the only cloud provider; the `onedrive` value remains in the
+`cloud_links` CHECK constraint because removing it would mean rebuilding the table,
+and no row uses it.
 
 ## Automatic backup
 

@@ -1,6 +1,6 @@
 # Social sign-in
 
-Google, Facebook, Microsoft and GitHub sign-in share one flow, described in
+Google sign-in (and the optional Facebook and GitHub providers) share one flow, described in
 `src/oauth.js`. Nothing here is active until the matching Worker secrets exist:
 `GET /api/auth/status` reports `configured: false` for a provider without them and
 the buttons stay hidden.
@@ -57,9 +57,9 @@ The outcome is written to the audit log as `auth.login` with
 Consequences worth knowing:
 
 - Because linking is by address, **the provider must be trusted to verify it**.
-  Google's `email_verified` claim is required, Facebook only returns confirmed
-  addresses, Microsoft directory addresses are confirmed, GitHub is read through
-  `/user/emails` and only a `verified` entry is accepted.
+  Google's `email_verified` claim is required (Facebook and GitHub, still present
+  as optional providers, follow analogous rules; GitHub is read through
+  `/user/emails` and only a `verified` entry is accepted).
 - Two different provider identities on the same address are the *same* account.
   That is the intended behaviour, and it is why the rule keys on the address.
 - An account created by a provider has no password. Setting one later adds a
@@ -68,13 +68,13 @@ Consequences worth knowing:
 ## Provider setup
 
 Redirect URI for every provider: `https://<worker-host>/api/auth/oauth/callback/<provider>`
-where `<provider>` is `google`, `facebook`, `microsoft` or `github`.
+where `<provider>` is `google` (the only provider with credentials wired),
+`facebook` or `github` (optional, no credentials).
 
 | Provider | Secrets | Notes |
 | --- | --- | --- |
-| Google | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Web application client. The same pair is used for Drive backup (`drive.appdata`). Add the APK's signing SHA-1 to the Android client if you also want native Google sign-in later. |
+| Google | `GOOGLE_CLIENT_ID` (var in `wrangler.jsonc`), `GOOGLE_CLIENT_SECRET` (secret) | Web application client. The same pair is used for Drive backup (`drive.appdata`). Add the APK's signing SHA-1 to the Android client if you also want native Google sign-in later. |
 | Facebook | `FACEBOOK_CLIENT_ID`, `FACEBOOK_CLIENT_SECRET` | Add the key hash printed by `keytool -exportcert … \| openssl sha1 -binary \| openssl base64` to the app in the Meta console. |
-| Microsoft | `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` | Multi-tenant app registration. The same pair is used for OneDrive backup (`Files.ReadWrite.AppFolder`). |
 | GitHub | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | OAuth App. No PKCE (GitHub does not accept it); `state` still protects the flow. |
 
 Set them with `npx wrangler secret put NAME`. Nothing provider-specific belongs in
