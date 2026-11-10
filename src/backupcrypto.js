@@ -1,7 +1,7 @@
 // Envelope encryption for the OAuth refresh tokens that keep a cloud drive
 // connected.
 //
-// A refresh token is a long-lived key to somebody's Google Drive or OneDrive, so
+// A refresh token is a long-lived key to somebody's Google Drive, so
 // it must not sit in D1 as plain text: a database dump, a support export or a SQL
 // injection would otherwise hand over the drive. It is sealed with AES-256-GCM
 // under a key that lives in a Worker secret (`BACKUP_KEY`, base64, 32 bytes), and

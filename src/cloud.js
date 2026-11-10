@@ -1,9 +1,9 @@
-// Google Drive and OneDrive connectors.
+// Google Drive connector.
 //
-// Both providers are wired for the narrowest scope that still allows a private
-// file: Google's `drive.appdata` (an app folder the user cannot even see in the
-// Drive UI) and Microsoft's `Files.ReadWrite.AppFolder`. The app never asks for
-// access to the rest of the drive, so a stolen token cannot read anything else.
+// The scope is the narrowest one that still allows a private file: Google's
+// `drive.appdata` (an app folder the user cannot even see in the Drive UI). The
+// app never asks for access to the rest of the drive, so a stolen token cannot
+// read anything else.
 //
 // A connection is: PKCE + state against the provider, a refresh token sealed by
 // src/backupcrypto.js before it reaches D1, and a short-lived access token that is
@@ -24,15 +24,6 @@ export const CLOUD_PROVIDERS = {
     clientIdKey: 'GOOGLE_CLIENT_ID',
     clientSecretKey: 'GOOGLE_CLIENT_SECRET',
     extraAuthorize: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
-  },
-  onedrive: {
-    label: 'OneDrive',
-    authorize: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-    token: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-    scope: 'offline_access Files.ReadWrite.AppFolder',
-    clientIdKey: 'MICROSOFT_CLIENT_ID',
-    clientSecretKey: 'MICROSOFT_CLIENT_SECRET',
-    extraAuthorize: {},
   },
 };
 
@@ -145,101 +136,66 @@ async function accessToken(env, saved, fetchImpl) {
 }
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
-const GRAPH_API = 'https://graph.microsoft.com/v1.0/me/drive';
 
-/** Upload one JSON file into the provider's private app folder. */
+/** Upload one JSON file into the account's private app folder. */
 export async function uploadBackup(env, saved, filename, text, fetchImpl = fetch) {
-  const provider = cloudProviderOf(env, saved.provider);
+  cloudProviderOf(env, saved.provider);
   const token = await accessToken(env, saved, fetchImpl);
-  if (saved.provider === 'google') {
-    // Drive's multipart upload is multipart/related, which FormData cannot produce.
-    const boundary = `ffp${b64url(crypto.getRandomValues(new Uint8Array(9)))}`;
-    const meta = JSON.stringify({ name: filename, mimeType: 'application/json', parents: ['appDataFolder'] });
-    const body =
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n` +
-      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${text}\r\n` +
-      `--${boundary}--`;
-    const res = await fetchImpl(
-      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size',
-      {
+  // Drive's multipart upload is multipart/related, which FormData cannot produce.
+  const boundary = `ffp${b64url(crypto.getRandomValues(new Uint8Array(9)))}`;
+  const meta = JSON.stringify({ name: filename, mimeType: 'application/json', parents: ['appDataFolder'] });
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n` +
+    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${text}\r\n` +
+    `--${boundary}--`;
+  const res = await fetchImpl(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size',
+    {
       method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': `multipart/related; boundary=${boundary}`,
-        },
-        body,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`,
       },
-    );
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data) throw new HttpError(502, 'Google Drive rejected the upload');
-    return { ok: true, provider: 'google', id: data.id || '', filename };
-  }
-  const url = `${GRAPH_API}/special/approot:/${encodeURIComponent(filename)}:/content`;
-  const res = await fetchImpl(url, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: text,
-  });
+      body,
+    },
+  );
   const data = await res.json().catch(() => null);
-  if (!res.ok || !data) throw new HttpError(502, 'OneDrive rejected the upload');
-  return { ok: true, provider: 'onedrive', id: data.id || '', filename };
+  if (!res.ok || !data) throw new HttpError(502, 'Google Drive rejected the upload');
+  return { ok: true, provider: 'google', id: data.id || '', filename };
 }
 
 /** The backups currently in the app folder, newest first. */
 export async function listBackups(env, saved, fetchImpl = fetch) {
-  const provider = cloudProviderOf(env, saved.provider);
+  cloudProviderOf(env, saved.provider);
   const token = await accessToken(env, saved, fetchImpl);
-  if (saved.provider === 'google') {
-    const query = encodeURIComponent("name contains 'family-planner-' and trashed = false");
-    const res = await fetchImpl(
-      `${DRIVE_API}/files?spaces=appdata&q=${query}&fields=files(id,name,createdTime,size)&orderBy=createdTime desc&pageSize=50`,
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data) throw new HttpError(502, 'Google Drive could not be listed');
-    return (data.files || []).map((f) => ({
-      id: f.id,
-      name: f.name,
-      createdAt: Date.parse(f.createdTime) || 0,
-      bytes: Number(f.size) || 0,
-    }));
-  }
+  const query = encodeURIComponent("name contains 'family-planner-' and trashed = false");
   const res = await fetchImpl(
-    `${GRAPH_API}/special/approot/children?$select=id,name,createdDateTime,size&$top=99`,
+    `${DRIVE_API}/files?spaces=appdata&q=${query}&fields=files(id,name,createdTime,size)&orderBy=createdTime desc&pageSize=50`,
     { headers: { Authorization: `Bearer ${token}` } },
   );
   const data = await res.json().catch(() => null);
-  if (!res.ok || !data) throw new HttpError(502, 'OneDrive could not be listed');
-  return (data.value || [])
-    .filter((f) => String(f.name || '').startsWith('family-planner-'))
-    .map((f) => ({
-      id: f.id,
-      name: f.name,
-      createdAt: Date.parse(f.createdDateTime) || 0,
-      bytes: Number(f.size) || 0,
-    }))
-    .sort((a, b) => b.createdAt - a.createdAt);
+  if (!res.ok || !data) throw new HttpError(502, 'Google Drive could not be listed');
+  return (data.files || []).map((f) => ({
+    id: f.id,
+    name: f.name,
+    createdAt: Date.parse(f.createdTime) || 0,
+    bytes: Number(f.size) || 0,
+  }));
 }
 
 export async function downloadBackup(env, saved, fileId, fetchImpl = fetch) {
-  const provider = cloudProviderOf(env, saved.provider);
+  cloudProviderOf(env, saved.provider);
   const token = await accessToken(env, saved, fetchImpl);
-  const url =
-    saved.provider === 'google'
-      ? `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`
-      : `${GRAPH_API}/items/${encodeURIComponent(fileId)}/content`;
+  const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`;
   const res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) throw new HttpError(502, 'That backup could not be downloaded');
   return res.text();
 }
 
 export async function deleteBackup(env, saved, fileId, fetchImpl = fetch) {
-  const provider = cloudProviderOf(env, saved.provider);
+  cloudProviderOf(env, saved.provider);
   const token = await accessToken(env, saved, fetchImpl);
-  const url =
-    saved.provider === 'google'
-      ? `${DRIVE_API}/files/${encodeURIComponent(fileId)}`
-      : `${GRAPH_API}/items/${encodeURIComponent(fileId)}`;
+  const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}`;
   const res = await fetchImpl(url, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
   // 404 means it is already gone, which is the outcome the caller wanted.
   if (!res.ok && res.status !== 404) throw new HttpError(502, 'That backup could not be removed');

@@ -1,4 +1,4 @@
-// Social sign-in: Google, Facebook, Microsoft and GitHub.
+// Social sign-in: Google (Facebook and GitHub remain optional providers).
 //
 // The flow is built for a WebView shell, so nothing about it depends on the
 // provider's page being allowed to load inside the app:
@@ -21,8 +21,6 @@ import { getMeta, setMeta, takeMeta } from './store.js';
 
 const TEN_MINUTES = 600_000;
 const TICKET_MS = 60_000;
-
-const GRAPH = 'https://graph.microsoft.com/v1.0/me';
 
 export const SIGNIN_PROVIDERS = {
   google: {
@@ -60,24 +58,6 @@ export const SIGNIN_PROVIDERS = {
       // Facebook only returns an address it has verified; a missing one means
       // the person hid it or never confirmed it.
       verified: (j) => Boolean(j.email),
-    },
-  },
-  microsoft: {
-    label: 'Microsoft',
-    authorize: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-    token: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-    scope: 'openid profile email User.Read',
-    pkce: true,
-    idKey: 'MICROSOFT_CLIENT_ID',
-    secretKey: 'MICROSOFT_CLIENT_SECRET',
-    userinfo: {
-      url: GRAPH,
-      id: (j) => j.id,
-      email: (j) => j.mail || j.userPrincipalName,
-      name: (j) => j.displayName || j.userPrincipalName,
-      // Work/school addresses come from the directory; personal accounts use the
-      // verified Microsoft address.
-      verified: () => true,
     },
   },
   github: {
