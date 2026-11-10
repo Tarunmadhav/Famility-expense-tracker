@@ -323,4 +323,70 @@ export const MIGRATIONS = [
       }
     },
   },
+  {
+    id: '0003_calendar_feed',
+    name: 'calendar subscription tokens',
+    statements: [
+      // One secret URL per account. A calendar client never sends a cookie, so the
+      // token is the credential; deleting the row revokes the subscription.
+      `CREATE TABLE IF NOT EXISTS calendar_feeds (
+        user_id TEXT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+        token TEXT NOT NULL UNIQUE CHECK (length(token) = 48),
+        created_at INTEGER NOT NULL
+      )`,
+    ],
+  },
+  {
+    id: '0004_calendar_feed_profile',
+    name: 'one calendar feed per book',
+    statements: [
+      // A token used to show every book the account could open, so subscribing in
+      // a calendar leaked the private book into a shared calendar. The token is
+      // now bound to one profile. SQLite cannot change a primary key in place, so
+      // the table is rebuilt; existing tokens move to the account's family book,
+      // which is what they were mostly showing anyway.
+      `CREATE TABLE IF NOT EXISTS calendar_feeds_v2 (
+        user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        profile_id TEXT NOT NULL,
+        token TEXT NOT NULL UNIQUE CHECK (length(token) = 48),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, profile_id)
+      )`,
+      `INSERT OR IGNORE INTO calendar_feeds_v2 (user_id, profile_id, token, created_at)
+        SELECT f.user_id,
+               COALESCE((SELECT p.id FROM profiles p
+                           JOIN profile_members m ON m.profile_id = p.id
+                          WHERE m.user_id = f.user_id AND p.kind = 'family'
+                          ORDER BY p.created_at LIMIT 1), '') ,
+               f.token, f.created_at
+          FROM calendar_feeds f`,
+      `DROP TABLE calendar_feeds`,
+      `ALTER TABLE calendar_feeds_v2 RENAME TO calendar_feeds`,
+    ],
+  },
+  {
+    id: '0005_clear_seeded_mobile',
+    name: 'drop the phone number the starter data used to write',
+    // The starter data set settings.mobile to a sample number, and that number
+    // then sat in Settings looking as if the account holder had typed it. New
+    // seed data leaves the field empty; this clears the value older accounts were
+    // given. Only the exact seeded string is touched — a number someone typed,
+    // even the same digits in another format, is left alone.
+    statements: [`SELECT 1`],
+    async after(env) {
+      const SEEDED = '+91 8985800099';
+      const rows = await env.DB.prepare(`SELECT k, v FROM meta WHERE k LIKE 'settings:%'`).all();
+      for (const row of rows.results || []) {
+        let parsed;
+        try {
+          parsed = JSON.parse(row.v);
+        } catch {
+          continue;
+        }
+        if (!parsed || parsed.mobile !== SEEDED) continue;
+        parsed.mobile = '';
+        await env.DB.prepare(`UPDATE meta SET v = ? WHERE k = ?`).bind(JSON.stringify(parsed), row.k).run();
+      }
+    },
+  },
 ];

@@ -8,7 +8,7 @@ import { protectDoc, revealDoc, encryptionReady } from './fieldcrypto.js';
 import { HttpError } from './errors.js';
 import { ensureProfiles, spaceForProfile } from './profiles.js';
 import { matchTotp, newRecoveryCode, normaliseRecoveryCode, otpauthUri, randomBase32 } from './twofactor.js';
-import { applyMigrations } from './migrations/runner.js';
+import { applyMigrations, pendingMigrations } from './migrations/runner.js';
 
 export const SCHEMA_VERSION = '13';
 // 100 000 is the maximum iteration count the production Workers runtime supports
@@ -103,9 +103,21 @@ export async function ensureSchema(env) {
   } catch {
     current = null;
   }
+  // The meta row records that the historic repair steps ran, but the chain keeps
+  // growing: a database that already carries the current version still needs any
+  // migration added after it. Gating on the version alone left new migrations
+  // unapplied on every existing deployment.
   if (current === SCHEMA_VERSION) {
-    schemaReady = true;
-    return;
+    let pending = null;
+    try {
+      pending = await pendingMigrations(env);
+    } catch {
+      pending = null; // no schema_migrations table yet: run the chain
+    }
+    if (pending && pending.length === 0) {
+      schemaReady = true;
+      return;
+    }
   }
   // v5 adds personal/family spaces. This has to run before the schema
   // migrations, because a pre-v5 `records` table is renamed and refilled here

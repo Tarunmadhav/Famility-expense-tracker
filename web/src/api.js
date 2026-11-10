@@ -73,6 +73,12 @@ export const startTwoFactor = () => request('/api/auth/2fa/start', { method: 'PO
 export const enableTwoFactor = (code) => request('/api/auth/2fa/enable', { method: 'POST', body: { code } });
 export const disableTwoFactor = (code) => request('/api/auth/2fa/disable', { method: 'POST', body: { code } });
 export const newRecoveryCode = () => request('/api/auth/recovery', { method: 'POST' });
+// The feed belongs to one book, so the profile travels with the request.
+export const calendarFeedUrl = (profile) =>
+  request(`/api/calendar/feed${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`);
+export const rotateCalendarFeed = (profile) =>
+  request(`/api/calendar/feed${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`, { method: 'POST' });
+
 export const cloudLinks = () => request('/api/cloud');
 export const cloudLinkStart = (provider) => request('/api/cloud/link', { method: 'POST', body: { provider } });
 export const cloudUnlink = (provider) => request('/api/cloud/unlink', { method: 'POST', body: { provider } });

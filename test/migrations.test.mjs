@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
+import { MIGRATIONS } from '../src/migrations/index.js';
 import { applyMigrations, migrationState, pendingMigrations } from '../src/migrations/runner.js';
 import { makeDatabase, scalar } from './helpers/d1.mjs';
 
@@ -20,14 +21,15 @@ async function freshDatabase() {
 
 test('migrations apply to an empty database and are recorded once', async () => {
   const { db, env, applied } = await freshDatabase();
-  assert.deepEqual(applied, ['0001_baseline', '0002_constraints']);
-  assert.equal(scalar(db, `SELECT COUNT(*) FROM schema_migrations`), 2);
+  const ids = MIGRATIONS.map((m) => m.id);
+  assert.deepEqual(applied, ids);
+  assert.equal(scalar(db, `SELECT COUNT(*) FROM schema_migrations`), ids.length);
   // Running again is a no-op: the bookkeeping row stops a second application.
   assert.deepEqual(await pendingMigrations(env), []);
   assert.deepEqual(await applyMigrations(env), []);
   const state = await migrationState(env);
   assert.deepEqual(state.pending, []);
-  assert.equal(state.latest, '0002_constraints');
+  assert.equal(state.latest, ids[ids.length - 1]);
 });
 
 test('the rebuilt tables carry real foreign keys', async () => {
@@ -121,7 +123,7 @@ test('a v12 database upgrades without losing rows and sheds dangling references'
   assert.equal(scalar(db, `SELECT COUNT(*) FROM sessions`), 2);
 
   const applied = await applyMigrations(env);
-  assert.deepEqual(applied, ['0001_baseline', '0002_constraints']);
+  assert.deepEqual(applied, MIGRATIONS.map((m) => m.id));
 
   // Everything that pointed at a real account survived.
   assert.equal(scalar(db, `SELECT COUNT(*) FROM users`), 2);

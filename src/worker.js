@@ -82,8 +82,17 @@ import { encryptionReady } from './fieldcrypto.js';
 import { downloadBackup, finishConnect, listBackups, providerInfo, startConnect } from './cloud.js';
 import { backupKeyConfigured } from './backupcrypto.js';
 import { CLOUD_PROVIDER_IDS, cloudLink, restoreExport, runBackup, runScheduledBackups } from './backup.js';
+import { calendarFeed, calendarToken } from './calendarfeed.js';
 import { emailConfigured, sendOtpEmail } from './email.js';
-import { handleMessage, parseWebhook, sendWhatsapp, verifySignature, whatsappConfigured } from './whatsapp.js';
+import {
+  handleMessage,
+  parseWebhook,
+  sendWhatsapp,
+  verifySignature,
+  whatsappConfigured,
+  whatsappMessagingConfigured,
+  whatsappMessagingMissing,
+} from './whatsapp.js';
 import {
   consumeLoginTicket,
   exchangeCode,
@@ -94,6 +103,7 @@ import {
   startAuthorization,
 } from './oauth.js';
 import { ICONS } from './icons.js';
+import { normaliseMobile } from './phone.js';
 import {
   ROLE_LABEL,
   audit,
@@ -408,6 +418,10 @@ function permissionFor(method, path) {
   if (path.startsWith('/api/profiles')) return null;
   if (path.startsWith('/api/cloud')) return null;
   if (path.startsWith('/api/whatsapp')) return null;
+  // The .ics feed authenticates by its token, and the two management routes are
+  // ordinary session routes below.
+  if (/^\/api\/calendar\/[0-9a-f]{48}\.ics$/.test(path)) return null;
+  if (path === '/api/calendar/feed') return method === 'GET' ? 'view' : 'manage';
   if (path === '/api/health') return null;
   if (path === '/api/notifications/read') return 'view';
   if (path.startsWith('/api/admin/')) return 'manage';
@@ -521,6 +535,14 @@ async function handleApi(request, env, ctx, url) {
     if (await hitRateLimit(env, `otp:${ip}`, 6, 3600_000)) {
       throw new HttpError(429, 'Too many codes requested. Try again in an hour.');
     }
+    // Checked before the lookup, and for every address: answering 501 only when
+    // the account exists would turn this form into an account-existence oracle.
+    if (!emailConfigured(env)) {
+      throw new HttpError(
+        501,
+        'Email is not configured. Add RESEND_API_KEY (and optionally MAIL_FROM) as Worker secrets to enable email codes.',
+      );
+    }
     const body = await readJson(request);
     const email = normaliseEmail(body.email);
     if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email address');
@@ -539,6 +561,12 @@ async function handleApi(request, env, ctx, url) {
     if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
     const ip = clientIp(request);
     if (await isLockedOut(env, ip)) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
+    if (!emailConfigured(env)) {
+      throw new HttpError(
+        501,
+        'Email is not configured. Add RESEND_API_KEY (and optionally MAIL_FROM) as Worker secrets to enable email codes.',
+      );
+    }
     const body = await readJson(request);
     const email = normaliseEmail(body.email);
     if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email address');
@@ -840,6 +868,25 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true }, 200, { 'Set-Cookie': clearCookie(url) });
   }
 
+  /* ------------------------------------------------------- calendar feed */
+
+  // A calendar app subscribes with a plain GET and no cookie, so the token in the
+  // path is the credential. It is unguessable (24 random bytes), revocable from
+  // Settings, and serves only books the account is a member of.
+  const feedMatch = path.match(/^\/api\/calendar\/([0-9a-f]{48})\.ics$/);
+  if (feedMatch && method === 'GET') {
+    const body = await calendarFeed(env, feedMatch[1]);
+    if (body == null) return json({ error: 'Unknown calendar URL' }, 404);
+    return new Response(body, {
+      headers: {
+        'Content-Type': 'text/calendar; charset=utf-8',
+        'Cache-Control': 'private, no-store',
+        'Content-Disposition': 'inline; filename="family-planner.ics"',
+        'X-Robots-Tag': 'noindex, nofollow',
+      },
+    });
+  }
+
   /* ------------------------------------------------------ whatsapp webhook */
 
   // Meta calls these two with no session and no Origin header; the request is
@@ -943,6 +990,27 @@ async function handleApi(request, env, ctx, url) {
     const body = await readJson(request);
     const name = await updateAccountName(env, session.userId, body.name);
     return json({ ok: true, name });
+  }
+
+  if (path === '/api/calendar/feed' && method === 'GET') {
+    const target = await resolveProfile(env, session, url.searchParams.get('profile'), 'view');
+    const token = await calendarToken(env, session.userId, target.id);
+    return json({
+      url: new URL(`/api/calendar/${token}.ics`, url.origin).toString(),
+      profile: target.id,
+      profileName: target.name,
+    });
+  }
+
+  if (path === '/api/calendar/feed' && method === 'POST') {
+    const target = await resolveProfile(env, session, url.searchParams.get('profile'), 'view');
+    const token = await calendarToken(env, session.userId, target.id, { rotate: true });
+    await audit(env, { action: 'calendar.rotate', actor: session.userId, profileId: target.id });
+    return json({
+      url: new URL(`/api/calendar/${token}.ics`, url.origin).toString(),
+      profile: target.id,
+      profileName: target.name,
+    });
   }
 
   if (path === '/api/auth/account' && method === 'GET') {
@@ -1094,6 +1162,15 @@ async function handleApi(request, env, ctx, url) {
     const rows = link.results || [];
     return json({
       configured: whatsappConfigured(env),
+      // Proactive notifications need a flag, credentials and an approved template;
+      // the app shows exactly what is missing instead of a vague failure.
+      messaging: {
+        configured: whatsappMessagingConfigured(env),
+        missing: whatsappMessagingMissing(env),
+      },
+      // The business number, when the owner set one, so the app can open a chat
+      // with the link code already typed in.
+      number: String(env.WHATSAPP_DISPLAY_NUMBER || '').replace(/\D/g, ''),
       links: rows.map((r) => ({
         phone: `••••${String(r.phone).slice(-4)}`,
         profile: r.profile,
@@ -1360,8 +1437,19 @@ async function handleApi(request, env, ctx, url) {
 
   if (path === '/api/settings' && method === 'POST') {
     const body = await readJson(request);
+    // Stored as E.164 so WhatsApp/SMS links and the Cloud API call cannot point at
+    // a half-typed number. An empty value is allowed: it means "alerts are off".
+    const mobile = normaliseMobile(String(body.mobile || '').slice(0, 40));
+    if (!mobile.ok) {
+      throw new HttpError(
+        400,
+        mobile.reason === 'missing-country-code'
+          ? 'Enter the number with its country code, for example +91 98765 43210'
+          : 'That is not a valid phone number — use the country code and 8 to 15 digits',
+      );
+    }
     const clean = {
-      mobile: String(body.mobile || '').slice(0, 40),
+      mobile: mobile.number,
       alertTime: /^\d{2}:\d{2}$/.test(String(body.alertTime || '')) ? body.alertTime : '06:00',
       channel: String(body.channel || '').slice(0, 80),
       currency: 'INR',

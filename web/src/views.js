@@ -249,7 +249,12 @@ export function settingsView() {
     .join('') || '<tr><td colspan="3" class="mut">No sessions</td></tr>';
 
   const subTotal = subscriptionsMonthly();
-  const pushState = !('Notification' in window)
+  // The Android shell has no Notification API but does post to the tray through its
+  // bridge, so the app must not tell a phone user that alerts are impossible.
+  const nativeShell = typeof window !== 'undefined' && Boolean(window.AndroidBridge && window.AndroidBridge.notify);
+  const pushState = nativeShell
+    ? 'This phone shows planner alerts in the notification tray through the Android app.'
+    : !('Notification' in window)
     ? 'This browser cannot show notifications.'
     : Notification.permission === 'granted' && S.pushEnabled
       ? 'Notifications are enabled on this device.'
@@ -373,16 +378,22 @@ export function settingsView() {
     <p class="hint mut">Automatic backup is off unless you turn it on. When it runs, the oldest backups beyond the number you keep are deleted from the app folder.</p>
   </div>
 
-  <div class="card"><h2>WhatsApp</h2>
+  <div class="card" id="card-whatsapp"><h2>WhatsApp</h2>
     <p class="mut" style="margin-top:0">Text the planner to read, add, change or remove anything: expenses,
       bills, tasks, insurance, loans and contacts. A number only gets access after you link it here.</p>
-    ${S.whatsapp && S.whatsapp.configured === false
-      ? '<p class="hint mut">Ask the owner to add WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, WHATSAPP_VERIFY_TOKEN and WHATSAPP_APP_SECRET as Worker secrets, then point the Meta webhook at <code>/api/whatsapp/webhook</code>.</p>'
-      : ''}
+    ${S.whatsapp && S.whatsapp.messaging && S.whatsapp.messaging.configured === false
+      ? `<p class="hint mut">WhatsApp messaging not configured: <code>${esc((S.whatsapp.messaging.missing || []).join(', ') || 'missing secrets')}</code>. The number below still powers the WhatsApp shortcuts on bills and alerts, which open your own WhatsApp to send the message yourself — the planner sends nothing until the secrets and an approved template are set.</p>`
+      : S.whatsapp && S.whatsapp.configured === false
+        ? '<p class="hint mut">Ask the owner to add WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, WHATSAPP_VERIFY_TOKEN and WHATSAPP_APP_SECRET as Worker secrets, then point the Meta webhook at <code>/api/whatsapp/webhook</code>.</p>'
+        : ''}
+    <div class="fld"><label>Your WhatsApp number</label><input id="s_mobile" type="tel" inputmode="tel" autocomplete="tel" placeholder="+91 98765 43210" value="${esc(S.settings.mobile || '')}"></div>
+    <p class="hint mut" style="margin-top:-2px">With the country code. Alerts open WhatsApp with the message ready to send, and this is the number the planner replies to once it is linked.</p>
+    <button class="btn s g" data-act="save-mobile">Save number</button>
     ${(S.whatsapp && S.whatsapp.links ? S.whatsapp.links : []).map((l) => `<div class="mrow"><span>${esc(l.phone)}</span><b>Linked</b>
       <span class="act"><button class="btn s r" data-act="wa-unlink">Unlink</button></span></div>`).join('')}
     ${S.whatsappCode
-      ? `<div class="alerts">Text <b>link ${esc(S.whatsappCode)}</b> to the planner's WhatsApp number. The code works once and expires in 10 minutes.</div>`
+      ? `<div class="alerts">Send <b>link ${esc(S.whatsappCode)}</b> from your WhatsApp to the planner's number. The code works once and expires in 10 minutes.
+        ${S.whatsapp && S.whatsapp.number ? `<div class="tools" style="margin:8px 0 0"><a class="btn s wa" target="_blank" rel="noopener" href="https://wa.me/${esc(S.whatsapp.number)}?text=${encodeURIComponent(`link ${S.whatsappCode}`)}">Open WhatsApp with the code</a></div>` : ''}</div>`
       : S.whatsapp && S.whatsapp.configured === false
         ? ''
         : '<p style="margin-top:10px"><button class="btn g" data-act="wa-link">Create link code</button></p>'}
@@ -408,8 +419,7 @@ export function settingsView() {
       .join('')}</div></div>
 
     <div class="card"><h2>Household &amp; alert settings</h2>
-    <div class="fld"><label>Household name</label><input id="s_household" value="${esc(S.settings.household || '')}"></div>
-    <div class="fld"><label>Linked mobile number</label><input id="s_mobile" value="${esc(S.settings.mobile || '')}"></div>
+    <div class="fld"><label>Household name</label><input id="s_household" placeholder="e.g. Gudipati household" value="${esc(S.settings.household || '')}"></div>
     <div class="fld"><label>Daily alert time (used for calendar events)</label><input id="s_time" type="time" value="${esc(S.settings.alertTime || '06:00')}"></div>
     <div class="fld"><label>Alert channel</label><select id="s_channel">${['Push + in-app', 'WhatsApp', 'SMS', 'All channels'].map((c) => `<option${c === (S.settings.channel || 'Push + in-app') ? ' selected' : ''}>${c}</option>`).join('')}</select></div>
     <p class="mut">WhatsApp and SMS open your own messenger with the alert text ready to send — nothing is sent automatically.</p>
@@ -444,8 +454,24 @@ export function settingsView() {
     <p class="mut">${(S.files || []).length} file${(S.files || []).length === 1 ? '' : 's'} · ${((S.filesTotal || 0) / 1048576).toFixed(2)} MB used${S.storage === false ? ' · storage is not configured for this site' : ''}. Bills and policy documents you attach are kept here.</p>
     ${(S.files || []).length ? `<div class="tw"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Added</th><th></th></tr></thead><tbody>${S.files.map((f) => `<tr><td><a href="/api/files/${esc(f.id)}" target="_blank" rel="noopener">${esc(f.name)}</a></td><td class="mut">${esc(String(f.mime).split('/')[1] || f.mime)}</td><td class="num">${Math.round(Number(f.size) / 1024)} KB</td><td class="mut">${esc(relative(f.created_at))}</td><td class="act"><button class="btn s r" data-act="drive-del" data-id="${esc(f.id)}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mut">Nothing uploaded yet — attach a bill from the Expenses form.</p>'}</div>
 
-  <div class="card"><h2>Calendar alerts</h2><p class="mut">Creates a calendar file with every uncompleted task, unpaid bill, insurance renewal and birthday, each with reminders (tasks: 1 day + at time; bills: 3 days, 1 day, at time; renewals: 30/15/7/1 days). Import it once into Google Calendar and re-import to update the same events. The 📅 button on each row adds a single event.</p>
-    <button class="btn" data-act="ics">Download calendar alerts (.ics)</button></div>
+  <div class="card"><h2>Calendar subscription</h2>
+    <p class="mut" style="margin-top:0">Subscribe once and your calendar keeps itself up to date: open tasks, unpaid bills, insurance renewals and subscription renewals, each with reminders. Works with Google Calendar, Apple Calendar, Outlook, Thunderbird and anything else that accepts a calendar URL. Events update in place, so a paid bill disappears instead of piling up.</p>
+    <p class="hint mut" style="margin:0 0 8px">This URL shows only the <b>${esc((S.profiles || []).find((p) => p.id === S.profileId)?.name || 'current')}</b> book. Switch book and open Settings again for that book's own URL.</p>
+    ${S.calendarFeed
+      ? `<div class="urlbox" aria-label="Calendar feed URL">${esc(S.calendarFeed)}</div>
+    <div class="tools"><button class="btn" data-act="ics-copy">Copy URL</button>
+      <button class="btn g" data-act="ics">Download .ics once</button>
+      <button class="btn g" data-act="ics-rotate">New URL</button></div>`
+      : `<p class="mut">Open Settings once you are signed in to get your calendar URL.</p>`}
+    <details style="margin-top:10px"><summary class="mut">How to add it in each calendar</summary>
+      <ul class="hint mut" style="margin:8px 0 0;padding-left:18px">
+        <li><b>Google Calendar</b> (web): Other calendars → + → <i>From URL</i> → paste → Add calendar. The Android and iPhone apps then show it automatically.</li>
+        <li><b>Apple Calendar</b> (iPhone/iPad/Mac): Settings → Calendar → Accounts → Add Account → Other → <i>Add Subscribed Calendar</i> → paste.</li>
+        <li><b>Outlook</b>: Calendar → Add calendar → <i>Subscribe from web</i> → paste → Import.</li>
+        <li><b>Thunderbird / Nextcloud</b>: New calendar → <i>On the network</i> → paste the URL.</li>
+      </ul>
+      <p class="hint mut">The URL is a secret: anyone who has it can read your event titles, so use <b>New URL</b> if it leaks. It only ever contains the books you are a member of.</p>
+    </details></div>
 
   <div class="card"><h2>Backup &amp; restore</h2>
     <p class="mut">Create an encrypted backup of <b>${esc(S.profile ? S.profile.name : 'this profile')}</b> only. The file is sealed with AES-256-GCM under a passphrase you choose here; the passphrase and the key never reach the server, so neither this app nor anyone running it can read the backup. Store it in Google Drive, OneDrive or anywhere else — it stays encrypted.</p>

@@ -32,6 +32,20 @@ class Statement {
   async first() {
     return this.db.prepare(this.sql).get(...this.params) ?? null;
   }
+
+  /**
+   * D1's batch returns rows for a SELECT, so reading statements must go through
+   * all() here. Running a SELECT through run() silently answered no rows, which
+   * made anything built on a batched read (getState does six of them) look empty.
+   */
+  runForBatch() {
+    const statement = this.db.prepare(this.sql);
+    if (/^\s*(select|pragma|with)\b/i.test(this.sql)) {
+      return { success: true, results: statement.all(...this.params) };
+    }
+    const info = statement.run(...this.params);
+    return { success: true, meta: { changes: info.changes, last_row_id: info.lastInsertRowid } };
+  }
 }
 
 export function makeDatabase(file = ':memory:') {
@@ -42,7 +56,7 @@ export function makeDatabase(file = ':memory:') {
     batch: async (statements) => {
       db.exec('BEGIN');
       try {
-        const out = statements.map((s) => s.run());
+        const out = statements.map((s) => s.runForBatch());
         db.exec('COMMIT');
         return out;
       } catch (err) {
