@@ -148,10 +148,10 @@ They run against a live URL with the owner's PIN; CI only runs the smoke check.
 
 ## Android App Links: the registered fingerprint is a debug key
 
-`ANDROID_SHA256` (a `wrangler.jsonc` variable) currently holds the **debug keystore**
-fingerprint of the local emulator build. A release build signs with a different key,
-so before any public release the release certificate's SHA-256 must be added to that
-variable (comma-separated) or App Links will fall back to the browser/chooser.
+`ANDROID_SHA256` (a `wrangler.jsonc` variable) holds the debug keystore fingerprint
+of the local emulator build **and** the release certificate's SHA-256, comma-separated
+as the Worker expects. A build signed with any other key falls back to the
+browser/chooser instead of opening the app.
 
 ```cmd
 keytool -list -v -keystore <release>.jks -alias <alias> | findstr SHA256

@@ -11,6 +11,19 @@ falls back to the debug key.
 | `ANDROID_KEY_ALIAS` | key alias inside the keystore |
 | `ANDROID_KEY_PASSWORD` | key password (often the same as the keystore password) |
 
+## This project's keystore
+
+The release key for this app already exists at
+`D:\family planner\signing\family-planner-release.jks` (alias `family-planner`),
+with its password in `signing\CREDENTIALS.txt`. Both are ignored by git; back
+them up offline, and re-export the certificate fingerprint with:
+
+```cmd
+keytool -list -v -keystore "D:\family planner\signing\family-planner-release.jks" -alias family-planner | findstr SHA256
+```
+
+The sections below are the from-scratch procedure, kept for a rebuild of the key.
+
 ## 1. Create your keystore (run this yourself, once)
 
 ```bash
