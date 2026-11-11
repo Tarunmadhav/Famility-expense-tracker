@@ -1,9 +1,10 @@
 // CSV / ICS / backup helpers carried over from the reference planner.
 
 import { COLLECTIONS } from './entities.js';
+import { docsFromGoogleRows } from './contactMap.js';
 import { S } from './state.js';
 import { alertsList, bdayNext, openTasks, taskDue } from './analytics.js';
-import { daysTo, dfmt, digits, iso, money, pd } from './format.js';
+import { daysTo, dfmt, iso, money, pd } from './format.js';
 
 export function download(name, text, mime = 'text/plain') {
   try {
@@ -232,58 +233,13 @@ export function normalizePhone(value) {
   return s[0] === '+' ? `+${d}` : d;
 }
 
-/** Convert a Google Contacts CSV export into planner contact documents. */
+/**
+ * Convert a Google Contacts CSV export into planner contact documents.
+ * The mapping itself lives in contactMap.js so the browser and the CLI dry run
+ * share one implementation; this keeps the name the app already imports.
+ */
 export function googleContactsToDocs(text) {
-  const rows = parseCSV(text);
-  if (rows.length < 2) return { docs: [], error: 'Empty file' };
-  const head = rows[0];
-  const idx = (name) => head.indexOf(name);
-  const iFirst = idx('First Name');
-  const iMiddle = idx('Middle Name');
-  const iLast = idx('Last Name');
-  const iOrg = idx('Organization Name');
-  const iTitle = idx('Organization Title');
-  const iBirthday = idx('Birthday');
-  const iLabels = idx('Labels');
-  const iEmail = idx('E-mail 1 - Value');
-  const phoneCols = [];
-  head.forEach((h, i) => {
-    if (/^Phone \d - Value$/.test(h)) phoneCols.push(i);
-  });
-  if (iFirst < 0 && iOrg < 0) return { docs: [], error: 'This does not look like a Google Contacts CSV' };
-
-  const docs = [];
-  const seen = new Set();
-  for (let r = 1; r < rows.length; r += 1) {
-    const row = rows[r];
-    if (!row || row.length < 2) continue;
-    const cell = (i) => (i >= 0 && row[i] ? String(row[i]).trim() : '');
-    const name = [cell(iFirst), cell(iMiddle), cell(iLast)].filter(Boolean).join(' ') || cell(iOrg);
-    const phones = [];
-    phoneCols.forEach((i) => {
-      String(row[i] || '').split(':::').forEach((p) => {
-        const normalized = normalizePhone(p);
-        if (normalized && !phones.includes(normalized)) phones.push(normalized);
-      });
-    });
-    if (!name && !phones.length) continue;
-    const dedupe = phones.length ? digits(phones[0]).slice(-10) : '';
-    if (dedupe && seen.has(dedupe)) continue;
-    if (dedupe) seen.add(dedupe);
-    const bday = cell(iBirthday).match(/^(\d{4}-\d{2}-\d{2})/);
-    docs.push({
-      name: name || phones[0],
-      rel: 'Google Contact',
-      mobile: phones[0] || '-',
-      alt: phones.slice(1, 3).join(', ') || '-',
-      email: cell(iEmail).split(':::')[0] || '-',
-      bday: bday ? bday[1] : '',
-      org: [cell(iOrg) !== name ? cell(iOrg) : '', cell(iTitle)].filter(Boolean).join(' - ') || '-',
-      module: 'Contacts Directory',
-      remarks: cell(iLabels).replace(/\* /g, '').replace(/:::/g, ', ') || '-',
-    });
-  }
-  return { docs };
+  return docsFromGoogleRows(parseCSV(text));
 }
 
 export function calendarFileName() {

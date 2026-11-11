@@ -16,10 +16,10 @@ import {
   csvTemplate,
   docsFromRows,
   download,
-  googleContactsToDocs,
   notificationMessage,
   recordMessage,
 } from './exporters.js';
+import { detectContactFormat, docsFromGoogleRows } from './contactMap.js';
 import { esc } from './format.js';
 
 /*
@@ -1941,38 +1941,41 @@ async function runImport(collection, file) {
   } catch (err) {
     return showImportFailures(collection, file.name, [{ row: 0, message: err.message }], [], 0);
   }
-  let parsed = docsFromRows(collection, rows);
-  if (parsed.errors.length && collection === 'contacts' && !/\.(xlsx|xlsm)$/i.test(file.name || '')) {
-    // A Google Contacts export has its own column names; keep that path working.
-    // Only CSV: reading an .xlsx as text gives binary noise, which the contacts
-    // reader would happily turn into junk rows.
-    const text = await file.text().catch(() => '');
-    const google = text ? googleContactsToDocs(text) : { docs: [] };
-    if (google.docs && google.docs.length) parsed = { docs: google.docs, errors: [], warnings: [], rows: google.docs.length };
+  // Which layout this file is, decided from its header row and not from the
+  // extension: a Google export arrives as .csv or .xlsx just as often.
+  const detected = detectContactFormat((rows && rows[0]) || []);
+  let parsed;
+  if (collection === 'contacts' && detected.format === 'google') {
+    parsed = docsFromGoogleRows(rows);
+  } else {
+    parsed = docsFromRows(collection, rows);
   }
+  const format = detected.format === 'unknown' ? '' : detected.reason;
   if (parsed.errors.length) {
-    return showImportFailures(collection, file.name, parsed.errors, parsed.warnings || [], parsed.rows || 0);
+    return showImportFailures(collection, file.name, parsed.errors, parsed.warnings || [], parsed.rows || 0, format);
   }
   await guard(async () => {
     const stats = await api.bulkImport(collection, parsed.docs);
     await refresh();
     const added = Number(stats.added || 0);
     const skipped = Number(stats.skipped || 0);
+    const notImported = parsed.report && parsed.report.unmapped ? parsed.report.unmapped.length : 0;
     toast(
-      `${added} row${added === 1 ? '' : 's'} imported${skipped ? `, ${skipped} already there` : ''}` +
-        (parsed.warnings && parsed.warnings.length ? ` · ${parsed.warnings.length} shortened` : ''),
+      `${added} row${added === 1 ? '' : 's'} imported from ${format || 'the file'}${skipped ? `, ${skipped} already there` : ''}` +
+        (parsed.warnings && parsed.warnings.length ? ` · ${parsed.warnings.length} shortened` : '') +
+        (notImported ? ` · ${notImported} columns not imported` : ''),
     );
   });
 }
 
 /** Row-level failures in a dialog: the line number, the column and the reason. */
-function showImportFailures(collection, fileName, errors, warnings, rowCount) {
+function showImportFailures(collection, fileName, errors, warnings, rowCount, format = '') {
   const def = COLLECTIONS[collection];
   const listed = errors.slice(0, 40);
   const more = errors.length - listed.length;
   document.getElementById('modal').innerHTML = `<div class="modal" data-act="close"><div class="box" data-stop="1" style="max-width:520px">
     <h2 style="margin:0 0 6px">Nothing imported</h2>
-    <p class="mut" style="margin:0 0 10px">${esc(fileName)} · ${esc(def.label)}${rowCount ? ` · ${rowCount} data row${rowCount === 1 ? '' : 's'} read` : ''}</p>
+    <p class="mut" style="margin:0 0 10px">${esc(fileName)} · ${esc(def.label)}${format ? ` · ${esc(format)}` : ''}${rowCount ? ` · ${rowCount} data row${rowCount === 1 ? '' : 's'} read` : ''}</p>
     <ul class="importlist">${listed
       .map((e) => `<li>${e.row ? `<b>Line ${e.row}</b> ` : ''}${e.field ? `${esc(e.field)}: ` : ''}${esc(e.message)}</li>`)
       .join('')}</ul>
