@@ -86,11 +86,11 @@ test('an empty file and a header-only file each explain themselves', async () =>
 test('the row limit and the size limit are refused before anything is written', async () => {
   const head = 'Date,Expense / merchant,Amount,Status\n';
   const row = '04/03/2026,Row,120,Paid\n';
-  const tooMany = head + row.repeat(MAX_IMPORT_ROWS + 1);
+  const tooMany = head + row.repeat(5001);
   const parsed = docsFromCsv('expenses', tooMany);
   assert.equal(parsed.docs.length, 0);
-  assert.match(parsed.errors[0].message, new RegExp(`at most ${MAX_IMPORT_ROWS}`));
-  assert.equal(docsFromCsv('expenses', head + row.repeat(MAX_IMPORT_ROWS)).docs.length, MAX_IMPORT_ROWS);
+  assert.match(parsed.errors[0].message, /at most 5000/);
+  assert.equal(docsFromCsv('expenses', head + row.repeat(5000)).docs.length, 5000);
 
   const big = new File([new Uint8Array(MAX_IMPORT_BYTES + 1)], 'big.csv', { type: 'text/csv' });
   await assert.rejects(readImportFile(big), /the limit is 2 MB/);
@@ -130,8 +130,21 @@ test('contacts still dedupe on the mobile number, not just on content', async ()
 
 test('an import larger than the batch limit is refused by the server too', async () => {
   const { env } = await envWithSchema();
-  const docs = Array.from({ length: 501 }, (_, i) => ({ date: '2026-03-04', item: `Row ${i}`, amount: i }));
-  await assert.rejects(bulkCreate(env, 'family', 'expenses', docs, 'tester'), /Import at most 500 rows/);
+  // 5001 rows should be rejected (over the 5000 limit)
+  const docs = Array.from({ length: 5001 }, (_, i) => ({ date: '2026-03-04', item: `Row ${i}`, amount: i }));
+  await assert.rejects(bulkCreate(env, 'family', 'expenses', docs, 'tester'), /Import at most 5000 rows/);
   const count = await env.DB.prepare(`SELECT COUNT(*) AS n FROM records WHERE collection = 'expenses'`).first();
   assert.equal(count.n, 0, 'a refused import must not have written anything');
+});
+
+test('a workbook saved as .csv is read as a workbook, not as text', async () => {
+  const bytes = await readFile(fixture('import-good.xlsx'));
+  // Some downloads (and every "Save as" dialog that guesses) rename the file.
+  const file = new File([bytes], 'contacts.csv', { type: 'text/csv' });
+  const { rows, isXlsx } = await readImportFile(file);
+  assert.equal(isXlsx, true, 'the ZIP signature should win over the extension');
+  const parsed = docsFromRows('expenses', rows);
+  assert.deepEqual(parsed.errors, []);
+  assert.equal(parsed.docs.length, 4);
+  assert.equal(parsed.docs[0].date, '2026-03-04');
 });

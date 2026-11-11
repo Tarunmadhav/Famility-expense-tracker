@@ -327,7 +327,7 @@ export function parseMoneyValue(value) {
 }
 
 /** Rows accepted from one file. The Worker writes them in a single transaction. */
-export const MAX_IMPORT_ROWS = 500;
+export const MAX_IMPORT_ROWS = 5000;
 
 function matchColumns(def, head) {
   const columns = [];

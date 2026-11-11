@@ -69,8 +69,8 @@ file (`Date,Expense / merchant,Amount,...`); fill it in a spreadsheet and import
 headers match. A Google Contacts export is detected automatically in Contacts.
 
 A file is checked before anything is saved: any bad cell is reported with its line number, the
-column and the reason, and the whole file is refused rather than half-imported. Limits are 2 MB and
-500 data rows per file. Importing the same file twice adds nothing the second time — rows are
+column and the reason, and the whole file is refused rather than half-imported. Limits are 5 MB and
+5000 data rows per file. Importing the same file twice adds nothing the second time — rows are
 compared by content (contacts also by mobile number) — and the rows of one file are written in a
 single D1 transaction.
 
@@ -102,7 +102,7 @@ import toast says how many columns were left out.
 
 Duplicates inside one file, and rows already in the book, are skipped by the last ten digits of the
 phone number or by email — the same rule the server applies, so a second import adds nothing. A row
-with no name at all is skipped and counted. Limits are 2 MB, 500 data rows per file and 500 rows per
+with no name at all is skipped and counted. Limits are 5 MB, 5000 data rows per file and 500 rows per
 batch; each batch is one D1 transaction, and a failed batch reports the rows it covered and writes
 none of them. A real import stops if more than 10% of the rows are rejected.
 
@@ -115,6 +115,9 @@ node scripts/import-contacts.mjs --file "C:\path\contacts.csv" --email you@examp
 
 The password is read from `%USERPROFILE%\.ffp-keys\import-password.txt` (override with
 `--password-file`), never from the command line.
+
+Any signed-in account can import contacts into a book it belongs to: the server writes only inside that
+account’s own profile membership, and a foreign profile id answers 404 without writing anything.
 
 ### Telegram setup
 
@@ -131,7 +134,10 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" -d "url=https://family
 ```
 
 6. In the app: **Settings → Notifications → Connect Telegram**, then send `/link CODE` to the bot.
-   Commands: `/start`, `/link CODE`, `/status`, `/settings [generic|detailed]`, `/unlink`, `/help`.
+   Commands: `/start`, `/link CODE`, `/verify [CODE]`, `/status`, `/settings [generic|detailed]`,
+   `/request`, `/upload`, `/unlink`, `/logout`, `/help`. `/verify` emails a 10-minute single-use code
+   and a chat must be verified before `/request` or `/upload` replies with a link; `/logout` unlinks
+   that chat only and leaves the app and the website signed in.
    Group chats are refused — a link belongs to one person's private chat. See `docs/TELEGRAM.md`.
 
 ## Data model

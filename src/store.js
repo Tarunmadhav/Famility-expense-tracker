@@ -1065,7 +1065,7 @@ export function docFingerprint(doc) {
 export async function bulkCreate(env, space, collection, docs, actor, options = {}) {
   const def = COLLECTIONS[collection];
   if (!def) throw new HttpError(400, 'Unknown collection');
-  const { dedupeKey = null, fingerprint = true, limit = 500 } = options;
+  const { dedupeKey = null, fingerprint = true, limit = 5000 } = options;
   const list = (Array.isArray(docs) ? docs : []).filter((d) => d && typeof d === 'object');
   if (!list.length) return { added: 0, skipped: 0 };
   if (list.length > limit) throw new HttpError(413, `Import at most ${limit} rows at a time (got ${list.length})`);

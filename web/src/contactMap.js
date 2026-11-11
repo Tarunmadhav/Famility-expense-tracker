@@ -263,6 +263,6 @@ export function importDecision({ total = 0, rejected = 0 } = {}) {
 /** Limits, stated in one place so the UI, the CLI and the docs agree. */
 export const CONTACT_IMPORT_LIMITS = {
   bytes: 2 * 1024 * 1024,
-  rows: 500,
+  rows: 5000,
   batch: 500,
 };
