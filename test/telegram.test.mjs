@@ -396,3 +396,48 @@ test('the card can link straight to the bot, and a bad username is dropped', asy
   const badState = await call(bad.env, '/api/telegram', { cookie: badUser.cookie });
   assert.equal(badState.data.botUsername, '');
 });
+
+test('every command BotFather lists is answered, including after /unlink', async () => {
+  const { env } = await setup();
+  const owner = await signup(env, 'commands@example.com');
+  const linked = await consumeLinkCode(
+    env,
+    (await call(env, '/api/telegram/link', { method: 'POST', cookie: owner.cookie })).data.code,
+    { telegramUserId: '700000080', chatId: '700000080' },
+  );
+  assert.equal(linked.ok, true);
+
+  const replyTo = async (text, updateId) => {
+    const realFetch = globalThis.fetch;
+    const sent = [];
+    globalThis.fetch = async (url, init) => {
+      sent.push(JSON.parse(init.body).text);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+    try {
+      await call(env, '/api/telegram/webhook', {
+        method: 'POST',
+        body: {
+          update_id: updateId,
+          message: { message_id: updateId, chat: { id: 700000080, type: 'private' }, from: { id: 700000080 }, text },
+        },
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': SECRET },
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    return sent[0] || '';
+  };
+
+  assert.match(await replyTo('/help', 501), /\/link CODE/);
+  assert.match(await replyTo('/start', 502), /already connected/);
+  assert.match(await replyTo('/status', 503), /Connected to/);
+  assert.match(await replyTo('/settings', 504), /\/settings generic/);
+  assert.match(await replyTo('/settings detailed', 505), /amounts and details/);
+  assert.match(await replyTo('/settings generic', 506), /generic preview/);
+  assert.match(await replyTo('/nonsense', 507), /Unknown command/);
+  // Only after the chat is unlinked does the guard answer first, which is right:
+  // there is nothing to run a command against any more.
+  assert.match(await replyTo('/unlink', 508), /Disconnected/);
+  assert.match(await replyTo('/status', 509), /not connected yet/);
+});
