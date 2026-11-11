@@ -23,6 +23,30 @@ function tgChatLink(tg) {
   return `<a class="btn${linked ? ' g' : ''}" href="https://t.me/${esc(user)}" target="_blank" rel="noopener">${linked ? 'Open chat' : 'Start chatting'}</a>`;
 }
 
+/**
+ * One status line per integration, in the four states the owner asked for:
+ * not set up (owner action needed), not connected, connected, or an error with
+ * the reason the server gave. Every card shows exactly one of these.
+ */
+export function integrationStatus({ label = 'Integration', configured = true, linked = false, missing = [], error = '' } = {}) {
+  if (error) return { state: 'error', text: `${label}: ${error}` };
+  if (!configured) {
+    const names = (missing || []).filter(Boolean);
+    return {
+      state: 'setup',
+      text: names.length
+        ? `Not set up — owner action needed: ${names.join(', ')}`
+        : `Not set up — owner action needed in ${label}`,
+    };
+  }
+  if (!linked) return { state: 'off', text: `Not connected — ${label} is available` };
+  return { state: 'on', text: `${label} connected` };
+}
+
+export function statusLine(status = {}) {
+  return `<p class="statusline" data-state="${esc(status.state || 'off')}">${esc(status.text || '')}</p>`;
+}
+
 export function headerSub() {
   const k = kpis();
   const kind = S.profile ? S.profile.kind : 'family';
@@ -371,8 +395,14 @@ export function settingsView() {
     <button class="btn" data-act="ai-add">Connect AI tool</button></div>
   <h2 class="grouphead">Notifications</h2>
   <div class="card" id="card-telegram"><h2>Telegram</h2>
+    ${statusLine(integrationStatus({
+      label: 'Telegram',
+      configured: !S.telegram || S.telegram.configured !== false,
+      linked: Boolean(S.telegram && S.telegram.link),
+      missing: (S.telegram && S.telegram.missing) || ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET'],
+    }))}
     ${(!S.telegram || S.telegram.configured === false)
-      ? `<p class="hint mut"><b>Not set up yet: owner action needed</b> — add <code>${esc(((S.telegram && S.telegram.missing) || ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET']).join(', '))}</code> as ${(((S.telegram && S.telegram.missing) || []).length === 1 ? 'a Worker secret' : 'Worker secrets')} and point the bot's webhook at <code>/api/telegram/webhook</code>.</p>
+      ? `<p class="hint mut">Add the missing Worker secrets above and point the bot's webhook at <code>/api/telegram/webhook</code>.</p>
           <div class="tools">${tgChatLink(S.telegram)}</div>`
       : S.telegram.link
         ? `<div class="mrow"><span>Connected chat</span><b>${esc(S.telegram.link.username ? `@${S.telegram.link.username}` : S.telegram.link.telegramUserId || 'Telegram')}</b></div>
@@ -424,8 +454,14 @@ export function settingsView() {
     ${(S.cloud || []).map((p) => {
       const runs = (S.backupRuns || []).filter((r) => r.provider === p.id);
       const files = (S.backupFiles || {})[p.id] || null;
-      return `<div class="mrow"><span><b>${esc(p.label)}</b><br>
-        <span class="mut">${p.linkedAt ? `Drive connected · ${relativetimeFrom(p.linkedAt)}` : p.configured ? 'Not connected' : `Google setup incomplete (owner action needed: ${esc((p.missing || ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']).join(', '))})`}</span></span>
+      return `      <div class="mrow"><span><b>${esc(p.label)}</b><br>
+        ${statusLine(integrationStatus({
+          label: p.label || 'Google Drive',
+          configured: Boolean(p.configured),
+          linked: Boolean(p.linkedAt),
+          missing: p.missing || ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'],
+          error: p.error || '',
+        }))}</span>
         <b>${p.lastBackupAt ? `Last backup ${relativetimeFrom(p.lastBackupAt)}` : p.configured ? (p.linkedAt ? 'No backup yet' : '—') : '—'}</b>
         <span class="act">
           ${p.linkedAt
