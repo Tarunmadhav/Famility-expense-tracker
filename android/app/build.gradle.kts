@@ -57,8 +57,11 @@ android {
             buildConfigField("boolean", "WEBVIEW_DEBUG", "true")
         }
         getByName("release") {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // R8 shrinks and obfuscates the release APK; the app has no reflection
+            // beyond the manifest entry points, which AGP keeps for us.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release")
         }
     }
