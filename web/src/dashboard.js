@@ -155,11 +155,6 @@ function familyDash() {
     <section class="hero">
       <div><h2>Good to see you${me.name ? `, ${esc(me.name.split(' ')[0])}` : ''}</h2>
         <p class="mut">${esc(S.profile ? S.profile.name : 'Family')} · ${k.pending} open task${k.pending === 1 ? '' : 's'} · ${k.unpaid > 0 ? `${money(k.unpaid)} in unpaid bills` : 'no unpaid bills'}</p></div>
-      <div class="heroacts">
-        <button class="btn s" data-act="add" data-ek="expenses">+ Expense</button>
-        <button class="btn s g" data-act="add" data-ek="payments">+ Bill</button>
-        <button class="btn s g" data-tab="reports">Reports</button>
-      </div>
     </section>
 
     <div class="stats">
@@ -263,11 +258,6 @@ function officeDash() {
     <section class="hero">
       <div><h2>Office overview</h2>
         <p class="mut">${esc(S.profile ? S.profile.name : 'Office')} · ${thisMonth.length} entries this month</p></div>
-      <div class="heroacts">
-        <button class="btn s" data-act="add" data-ek="expenses">+ Expenditure</button>
-        <button class="btn s g" data-act="add" data-ek="diary">+ Task</button>
-        <button class="btn s g" data-tab="reports">Reports</button>
-      </div>
     </section>
 
     <div class="stats">
@@ -287,18 +277,7 @@ function officeDash() {
       ${panel('Recent expenditure', 'Open ledger', 'expenses', listRows(recent, 'No expenditure recorded this month.'))}
     </div>
 
-    <div class="split wide">
-      ${panel('Open tasks', 'Task board', 'diary', listRows(taskRows, 'No open tasks.'))}
-      <section class="card">
-        <div class="phead"><h2>Quick entry</h2></div>
-        <div class="qgrid">
-          <button class="qbtn" data-act="add" data-ek="expenses"><b>Expenditure</b><small>record a business cost</small></button>
-          <button class="qbtn" data-act="add" data-ek="contacts"><b>Contact</b><small>add to the directory</small></button>
-          <button class="qbtn" data-act="add" data-ek="diary"><b>Task</b><small>schedule follow-up</small></button>
-          <button class="qbtn" data-tab="reports"><b>Report</b><small>monthly breakdown</small></button>
-        </div>
-      </section>
-    </div>
+    ${panel('Open tasks', 'Task board', 'diary', listRows(taskRows, 'No open tasks.'))}
   </div>`;
 }
 
@@ -346,10 +325,6 @@ function personalDash() {
     <section class="hero">
       <div><h2>My money</h2>
         <p class="mut">Private to ${esc(S.me.name || 'you')} · ${thisMonth.length} entries this month</p></div>
-      <div class="heroacts">
-        <button class="btn s" data-act="add" data-ek="expenses">+ Expense</button>
-        <button class="btn s g" data-act="add" data-ek="budgetIn">+ Income</button>
-      </div>
     </section>
 
     <div class="stats">
