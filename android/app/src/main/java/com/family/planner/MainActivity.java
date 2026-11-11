@@ -5,12 +5,15 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.webkit.CookieManager;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -45,6 +48,17 @@ public class MainActivity extends Activity {
     // Social sign-in starts in the system browser and comes back as an app link on
     // this path (see the intent filter in AndroidManifest.xml).
     private static final String OAUTH_RETURN_PATH = "/api/auth/oauth/finish";
+
+    // A <input type="file"> in the page (import a CSV/Excel file, attach a receipt,
+    // restore a backup) only opens the system picker if the WebView has a
+    // WebChromeClient that answers onShowFileChooser. Without one, Android silently
+    // does nothing when the clicked input asks for a file.
+    private static final int FILE_CHOOSER_REQUEST = 4501;
+    private ValueCallback<Uri[]> filePathCallback;
+    // True while our own picker is in front. The picker pauses this activity, and a
+    // pause normally locks the planner and drops what is on screen — which would make
+    // finishing an import impossible, because the unlock screen replaces the form.
+    private boolean choosingFile;
 
     private WebView web;
     private View splash;
@@ -94,6 +108,39 @@ public class MainActivity extends Activity {
         WebView.setWebContentsDebuggingEnabled(BuildConfig.WEBVIEW_DEBUG);
 
         web.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                // A second request while one is open replaces the first, otherwise the
+                // earlier callback never receives a value and the page waits forever.
+                if (filePathCallback != null) {
+                    filePathCallback.onReceiveValue(null);
+                    filePathCallback = null;
+                }
+                filePathCallback = callback;
+                choosingFile = true;
+                Intent picker;
+                try {
+                    picker = params.createIntent();
+                } catch (Exception e) {
+                    picker = null;
+                }
+                if (picker == null) {
+                    picker = new Intent(Intent.ACTION_GET_CONTENT);
+                    picker.addCategory(Intent.CATEGORY_OPENABLE);
+                    picker.setType("*/*");
+                }
+                try {
+                    startActivityForResult(picker, FILE_CHOOSER_REQUEST);
+                    return true;
+                } catch (Exception e) {
+                    filePathCallback = null;
+                    choosingFile = false;
+                    return false;
+                }
+            }
+        });
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -257,6 +304,35 @@ public class MainActivity extends Activity {
         if (web != null) web.loadUrl(data.toString());
     }
 
+    /**
+     * The file the picker returned. Without this the callback stays open and the
+     * page's input never receives a file, which looks like the button does nothing.
+     */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == FILE_CHOOSER_REQUEST) {
+            choosingFile = false;
+            Uri[] picked = null;
+            if (resultCode == RESULT_OK && data != null) {
+                ClipData clip = data.getClipData();
+                if (clip != null && clip.getItemCount() > 0) {
+                    picked = new Uri[clip.getItemCount()];
+                    for (int i = 0; i < clip.getItemCount(); i++) {
+                        picked[i] = clip.getItemAt(i).getUri();
+                    }
+                } else if (data.getData() != null) {
+                    picked = new Uri[]{data.getData()};
+                }
+            }
+            if (filePathCallback != null) {
+                filePathCallback.onReceiveValue(picked);
+                filePathCallback = null;
+            }
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
+    }
+
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
@@ -272,7 +348,11 @@ public class MainActivity extends Activity {
         // lock is requested from here as well. This is what makes closing the app lock
         // it instead of relying on the inactivity timer.
         if (web != null) {
-            web.evaluateJavascript("window.__plannerHide&&window.__plannerHide()", null);
+            // The file picker is our own activity: the user has not left the planner,
+            // and locking here would throw away the form they are filling in.
+            if (!choosingFile) {
+                web.evaluateJavascript("window.__plannerHide&&window.__plannerHide()", null);
+            }
             web.onPause();
         }
         // A sign-in arrives as an XHR Set-Cookie, long after onPageFinished, so the
@@ -285,6 +365,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // A picker that returned without a result (back press) still ends the pause
+        // exemption, so the next Home press locks as usual.
+        if (choosingFile && filePathCallback == null) choosingFile = false;
         if (web != null) web.onResume();
     }
 
