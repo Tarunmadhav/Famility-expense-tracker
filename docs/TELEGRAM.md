@@ -85,6 +85,20 @@ Rules enforced by the Worker, not the UI:
 - the Telegram numeric id and the private chat id are the only identity keys.
   Usernames and phone numbers are optional display data and never prove anything.
 
+### What the card shows
+
+| Worker state | Settings → Notifications → Telegram |
+| --- | --- |
+| token or webhook secret missing | **Not set up yet: owner action needed**, naming the missing secrets and the webhook URL |
+| both set, no chat linked | Start chatting + Connect Telegram |
+| linked | the chat, when it was linked, the preview setting, Disconnect |
+
+The card never pretends to work: `POST /api/telegram/webhook` answers `501`
+with the name of the missing secret, and `/api/telegram` reports the same list in
+`missing`. **Start chatting** opens `https://t.me/<TELEGRAM_BOT_USERNAME>`; on
+Android the WebView hands that link to the system, so it opens the Telegram app
+when it is installed and the browser otherwise.
+
 ## 3. What gets sent
 
 | Preference | Message |

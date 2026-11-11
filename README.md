@@ -280,10 +280,12 @@ npx wrangler secret put GOOGLE_CLIENT_SECRET
 
 Register `<your-worker-url>/api/cloud/callback/google` as the redirect URI, and enable the Drive API
 with the `drive.appdata` scope (an app-private folder the user cannot browse). Until both values exist
-the API answers `501` naming the missing variable and Settings shows "Owner must add credentials", so
-nothing silently fails. Tokens are sealed with `BACKUP_KEY` before they reach D1 in `cloud_links` and are
-never sent to the browser. Connecting is one tap in Settings: the button goes straight to Google and the
-callback returns to the app with the result.
+the API answers `501` naming the missing variable and Settings shows "Google setup incomplete (owner
+action needed: NAME)", so nothing silently fails. Tokens are sealed with `BACKUP_KEY` before they reach
+D1 in `cloud_links` and are never sent to the browser; without it the card says "Backup key not set
+(owner action needed: BACKUP_KEY)". Connecting is one tap in Settings ("Connect Google Drive"): the
+button goes straight to Google, the callback returns to the app, and the card then reads "Drive
+connected".
 
 ### Email codes (password reset)
 
@@ -292,8 +294,11 @@ callback returns to the app with the result.
 
 ```bash
 npx wrangler secret put RESEND_API_KEY
-npx wrangler secret put MAIL_FROM   # optional, e.g. 'Planner <codes@yourdomain>'
 ```
+
+The sender is `MAIL_FROM` in `wrangler.jsonc` (a public var, not a secret). It ships as
+`onboarding@resend.dev`, Resend's own test address, which **only delivers to the Resend account owner**;
+replace it with an address on a verified domain before anybody else signs in by email code.
 
 Without `RESEND_API_KEY` the endpoint answers `501` naming the variable and the form stays visible, so
 the failure is explicit. Verification is server-side (`createEmailOtp` / `consumeEmailOtp` in
@@ -314,7 +319,10 @@ after ten minutes.
 ### Telegram alerts
 
 One bot serves every household in the deployment. A chat receives nothing until it is linked from a
-signed-in session, and every send resolves its recipients from D1 at that moment.
+signed-in session, and every send resolves its recipients from D1 at that moment. The bot is
+`@FamilyFinancePlanner_bot`; its public username lives in `wrangler.jsonc` as `TELEGRAM_BOT_USERNAME`, and
+Settings → Notifications → Telegram offers a **Start chatting** button that opens
+`https://t.me/FamilyFinancePlanner_bot` in the browser or the Telegram app.
 
 ```bash
 npx wrangler secret put TELEGRAM_BOT_TOKEN      # from @BotFather
@@ -334,6 +342,24 @@ Full setup, command list and the security model: [docs/TELEGRAM.md](docs/TELEGRA
 ten minutes and is stored only as a hash; one Telegram identity per planner account and one account per
 identity; the webhook rejects any request whose `X-Telegram-Bot-Api-Secret-Token` does not match; the
 default alert is a generic "You have a new planner alert" and amounts are opt-in per chat.
+
+## Owner secret checklist
+
+Deploy the Worker first (`npx wrangler deploy`), then set only the secrets that are missing. Names are
+listed, never values; `npx wrangler secret list` prints the same list without them.
+
+| Name | Kind | Needed for | Set with |
+| --- | --- | --- | --- |
+| `FIELD_KEY` | secret | encrypting phones, emails, notes | `npx wrangler secret put FIELD_KEY` |
+| `BACKUP_KEY` | secret | sealing Google Drive refresh tokens | `npx wrangler secret put BACKUP_KEY` |
+| `GOOGLE_CLIENT_SECRET` | secret | Google sign-in and Drive | `npx wrangler secret put GOOGLE_CLIENT_SECRET` |
+| `RESEND_API_KEY` | secret | email codes for password reset | `npx wrangler secret put RESEND_API_KEY` |
+| `TELEGRAM_BOT_TOKEN` | secret | Telegram alerts | `npx wrangler secret put TELEGRAM_BOT_TOKEN` |
+| `TELEGRAM_WEBHOOK_SECRET` | secret | accepting Telegram updates | `npx wrangler secret put TELEGRAM_WEBHOOK_SECRET`, then re-run `setWebhook` with the same value |
+
+Public configuration lives in `wrangler.jsonc` and must never move into a secret or the other way round:
+`ANDROID_SHA256`, `GOOGLE_CLIENT_ID`, `MAIL_FROM`, `TELEGRAM_BOT_USERNAME`. A name defined in both places
+is a bug — the var wins in `env` and the secret silently never applies.
 
 ## Local development
 
