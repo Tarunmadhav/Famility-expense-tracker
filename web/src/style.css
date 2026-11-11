@@ -124,9 +124,6 @@ input.search { flex: 1 1 220px; min-width: 160px; }
 .alerts { background: var(--tint); border: 1px solid var(--line); color: var(--ink); border-radius: 10px; padding: 9px 12px; margin-bottom: 12px; }
 .alerts b { font-weight: 650; }
 .alerts ul { margin: 6px 0 0 18px; padding: 0; }
-.res { background: var(--tint); border-radius: 8px; padding: 10px; margin-top: 8px; min-height: 60px; }
-.res .row { display: flex; gap: 8px; margin: 2px 0; }
-.res .row span:first-child { color: var(--mute); min-width: 92px; font-size: 12px; }
 .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--accent); color: var(--accent-ink); padding: 9px 16px; border-radius: 999px; z-index: 99; font-size: 12.5px; max-width: 90vw; text-align: center; box-shadow: 0 8px 24px rgba(0, 0, 0, .22); }
 
 /* ------------------------------------------------------------ interactive */
@@ -164,9 +161,6 @@ input.search { flex: 1 1 220px; min-width: 160px; }
 .filemeta { font-size: 11px; margin-top: 3px; color: var(--mute); }
 .filecell a { font-size: 15px; text-decoration: none; }
 #modal input[type="file"] { padding: 6px; font-size: 12px; }
-.sect { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: var(--card); }
-.sect > h3 { margin: 0 0 4px; font-size: 12.5px; font-weight: 650; text-transform: none; letter-spacing: 0; color: var(--ink); }
-.sect .hint { font-size: 11.5px; color: var(--mute); margin-bottom: 8px; }
 .row2 { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 
 /* --------------------------------------------------------- notifications */
