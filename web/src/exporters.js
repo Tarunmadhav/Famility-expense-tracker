@@ -301,52 +301,173 @@ export function csvTemplate(collection) {
   return `\ufeff${heads.join(',')}\r\n`;
 }
 
-function normaliseDate(value) {
-  const s = String(value || '').trim();
-  if (!s) return '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  const m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
-  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-  return s;
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+function realDate(y, m, d) {
+  const year = Number(y);
+  const month = Number(m);
+  const day = Number(d);
+  if (!year || month < 1 || month > 12 || day < 1 || day > 31) return '';
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return '';
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-/** Turn a CSV written against csvTemplate() back into documents for the API. */
-export function docsFromCsv(collection, text) {
-  const def = COLLECTIONS[collection];
-  const rows = parseCSV(String(text || '').replace(/^\ufeff/, ''));
-  if (!rows.length) return { docs: [], error: 'That file is empty' };
-  const head = rows[0].map((h) => String(h).trim().toLowerCase());
-  const columns = {};
+function twoDigitYear(y) {
+  const n = Number(y);
+  if (String(y).length >= 4) return n;
+  return n <= 68 ? 2000 + n : 1900 + n;
+}
+
+/**
+ * Read whatever a spreadsheet holds as a date. Day-first (dd/mm/yyyy) is the
+ * household convention; a value that can only be month-first is read that way.
+ * Returns { value } or { error } so the caller can name the bad row.
+ */
+export function parseDateValue(value) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) return { value: '' };
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$/);
+  if (iso) {
+    const ok = realDate(iso[1], iso[2], iso[3]);
+    return ok ? { value: ok } : { error: `"${s}" is not a real date` };
+  }
+  const dmy = s.match(/^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})$/);
+  if (dmy) {
+    let first = Number(dmy[1]);
+    let second = Number(dmy[2]);
+    if (first > 12 && second > 12) return { error: `"${s}" is not a real date` };
+    if (second > 12) [first, second] = [second, first];
+    const ok = realDate(twoDigitYear(dmy[3]), second, first);
+    return ok ? { value: ok } : { error: `"${s}" is not a real date` };
+  }
+  const named = s.match(/^(\d{1,2})[\s\-]([A-Za-z]{3,})[\s\-,.]+(\d{2,4})$/);
+  if (named) {
+    const month = MONTHS.indexOf(named[2].slice(0, 3).toLowerCase()) + 1;
+    if (month) {
+      const ok = realDate(twoDigitYear(named[3]), month, named[1]);
+      return ok ? { value: ok } : { error: `"${s}" is not a real date` };
+    }
+  }
+  return { error: `"${s}" is not a date (use 31/12/2026 or 2026-12-31)` };
+}
+
+/**
+ * Read a money cell: ₹ and separators are ignored, "12,345/-" and "(500)" work,
+ * an empty cell is zero. Anything else is an error rather than a silent zero.
+ */
+export function parseMoneyValue(value) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) return { value: 0 };
+  const negative = /^\(.*\)$/.test(s);
+  const cleaned = s.replace(/^\(|\)$/g, '').replace(/[₹$\u20b9\s,]/g, '').replace(/\/-$/, '').replace(/^-$/, '-');
+  if (cleaned === '' || cleaned === '-' || /^(na|n\/a)$/i.test(cleaned)) return { value: 0 };
+  if (!/^[-+]?\d+(\.\d+)?$/.test(cleaned)) {
+    return { error: `"${s}" is not an amount (use 1250 or 1,250.50)` };
+  }
+  const n = Number(cleaned);
+  if (!Number.isFinite(n)) return { error: `"${s}" is not an amount` };
+  return { value: negative ? -Math.abs(n) : n };
+}
+
+/** Rows accepted from one file. The Worker writes them in a single transaction. */
+export const MAX_IMPORT_ROWS = 500;
+
+function matchColumns(def, head) {
+  const columns = [];
   def.fields.forEach((f) => {
     if (def.autoId && f.k === 'id') return;
-    const byLabel = head.indexOf(f.l.toLowerCase());
-    const byKey = head.indexOf(f.k.toLowerCase());
+    const byLabel = head.indexOf(f.l.trim().toLowerCase());
+    const byKey = head.indexOf(f.k.trim().toLowerCase());
     const at = byLabel >= 0 ? byLabel : byKey;
-    if (at >= 0) columns[f.k] = { at, field: f };
+    if (at >= 0) columns.push({ at, field: f });
   });
-  if (!Object.keys(columns).length) {
-    return { docs: [], error: 'The first row must hold column headers (download the template first)' };
+  return columns;
+}
+
+/**
+ * Map rows (already split into cells) onto one module's fields.
+ *
+ * Every problem is reported against the row number the user sees in their
+ * spreadsheet, and one bad row rejects the file instead of importing half of
+ * it — a silent "0 rows imported" is the bug this replaces.
+ */
+export function docsFromRows(collection, rows) {
+  const def = COLLECTIONS[collection];
+  if (!def) return { docs: [], errors: [{ row: 0, message: 'Unknown module' }] };
+  const all = (rows || []).filter((r) => Array.isArray(r) && r.some((c) => String(c == null ? '' : c).trim() !== ''));
+  if (!all.length) return { docs: [], errors: [{ row: 0, message: 'That file is empty' }] };
+
+  const head = all[0].map((h) => String(h == null ? '' : h).trim().toLowerCase());
+  const columns = matchColumns(def, head);
+  if (!columns.length) {
+    return {
+      docs: [],
+      errors: [
+        {
+          row: 1,
+          message: `No column headers matched. The first row should name the fields, for example: ${def.fields
+            .filter((f) => !(def.autoId && f.k === 'id'))
+            .slice(0, 4)
+            .map((f) => f.l)
+            .join(', ')}`,
+        },
+      ],
+    };
   }
+
+  const dataRows = all.slice(1);
+  if (!dataRows.length) return { docs: [], errors: [{ row: 2, message: 'No data rows below the header' }] };
+  if (dataRows.length > MAX_IMPORT_ROWS) {
+    return {
+      docs: [],
+      errors: [
+        {
+          row: MAX_IMPORT_ROWS + 2,
+          message: `That file has ${dataRows.length} rows; import at most ${MAX_IMPORT_ROWS} at a time (split the file)`,
+        },
+      ],
+    };
+  }
+
   const docs = [];
-  for (let r = 1; r < rows.length; r += 1) {
-    const row = rows[r];
-    if (!row || !row.some((c) => String(c).trim())) continue;
+  const errors = [];
+  const warnings = [];
+  dataRows.forEach((row, i) => {
+    const line = i + 2; // the spreadsheet's own line number: header is line 1
     const doc = {};
-    Object.entries(columns).forEach(([key, { at, field }]) => {
+    columns.forEach(({ at, field }) => {
       const raw = String(row[at] == null ? '' : row[at]).trim();
       if (field.t === 'money' || field.t === 'pct') {
-        const cleaned = raw.replace(/[₹,\s]/g, '');
-        doc[key] = cleaned === '' ? 0 : Number(cleaned) || 0;
+        const parsed = parseMoneyValue(raw);
+        if (parsed.error) errors.push({ row: line, field: field.l, message: parsed.error });
+        doc[field.k] = parsed.error ? 0 : parsed.value;
       } else if (field.t === 'date') {
-        doc[key] = normaliseDate(raw);
+        const parsed = parseDateValue(raw);
+        if (parsed.error) errors.push({ row: line, field: field.l, message: parsed.error });
+        doc[field.k] = parsed.error ? '' : parsed.value;
+      } else if (field.t === 'select' && raw && Array.isArray(field.o) && !field.o.includes(raw)) {
+        errors.push({ row: line, field: field.l, message: `"${raw}" is not one of ${field.o.join(' / ')}` });
+        doc[field.k] = '';
       } else {
-        doc[key] = raw;
+        if (field.max && raw.length > field.max) {
+          warnings.push({ row: line, field: field.l, message: `shortened to ${field.max} characters` });
+        }
+        doc[field.k] = field.max ? raw.slice(0, field.max) : raw;
       }
     });
     docs.push(doc);
-  }
-  if (!docs.length) return { docs: [], error: 'No data rows found below the header' };
-  return { docs };
+  });
+
+  if (errors.length) return { docs: [], errors, warnings, rows: dataRows.length };
+  return { docs, errors: [], warnings, rows: dataRows.length };
+}
+
+/** Turn CSV text written against csvTemplate() back into documents for the API. */
+export function docsFromCsv(collection, text) {
+  const src = String(text || '').replace(/^\ufeff/, '');
+  if (!src.trim()) return { docs: [], errors: [{ row: 0, message: 'That file is empty' }] };
+  return docsFromRows(collection, parseCSV(src));
 }
 
 /* ------------------------------------------------------------- plain text */

@@ -59,12 +59,20 @@ a real database, live multi-device sync, PIN-protected sessions and push notific
 * Utilities: contact search by name→number and number→name, India-format money/date helpers,
   `.ics` calendar export with per-event alarms, Google Contacts CSV import, JSON backup
 
-### CSV round-trip
+### Spreadsheet round-trip
 
-Every module toolbar has **Export**, **Template** and **Import CSV**. The template is a header-only
-file (`Date,Expense / merchant,Amount,...`); fill it in a spreadsheet and import it back. Amounts may
-contain `₹`/thousands separators, dates may be `YYYY-MM-DD` or `DD/MM/YYYY`, and column order is
-free as long as the headers match. A Google Contacts export is detected automatically in Contacts.
+Every module toolbar has **Export**, **Template** and **Import**. The template is a header-only
+file (`Date,Expense / merchant,Amount,...`); fill it in a spreadsheet and import it back as `.csv`
+(including the UTF-8 BOM Excel writes) or `.xlsx`/`.xlsm`, first worksheet. Amounts may contain
+`₹` and thousands separators (`1,23,456.00`, `12,345/-`), dates may be `YYYY-MM-DD`, `DD/MM/YYYY`,
+`DD-MM-YY`, `DD Mon YYYY`, or a real Excel date cell, and column order is free as long as the
+headers match. A Google Contacts export is detected automatically in Contacts.
+
+A file is checked before anything is saved: any bad cell is reported with its line number, the
+column and the reason, and the whole file is refused rather than half-imported. Limits are 2 MB and
+500 data rows per file. Importing the same file twice adds nothing the second time — rows are
+compared by content (contacts also by mobile number) — and the rows of one file are written in a
+single D1 transaction.
 
 ## Data model
 

@@ -1050,30 +1050,90 @@ export async function deleteRecord(env, space, collection, id, actor) {
   return { rev };
 }
 
-export async function bulkCreate(env, space, collection, docs, actor, dedupeKey) {
-  if (!COLLECTIONS[collection]) throw new HttpError(400, 'Unknown collection');
-  const stats = { added: 0, skipped: 0 };
+/**
+ * A row's content, so the same import twice cannot double the ledger.
+ * Ids are left out: they are generated, so they differ on every import.
+ */
+export function docFingerprint(doc) {
+  return Object.keys(doc || {})
+    .filter((k) => k !== 'id')
+    .sort()
+    .map((k) => `${k}=${String(doc[k] == null ? '' : doc[k])}`)
+    .join('\u0001');
+}
+
+export async function bulkCreate(env, space, collection, docs, actor, options = {}) {
+  const def = COLLECTIONS[collection];
+  if (!def) throw new HttpError(400, 'Unknown collection');
+  const { dedupeKey = null, fingerprint = true, limit = 500 } = options;
+  const list = (Array.isArray(docs) ? docs : []).filter((d) => d && typeof d === 'object');
+  if (!list.length) return { added: 0, skipped: 0 };
+  if (list.length > limit) throw new HttpError(413, `Import at most ${limit} rows at a time (got ${list.length})`);
+
   const existing = new Set();
-  if (dedupeKey) {
-    for (const rec of await listCollection(env, space, collection)) {
-      const key = dedupeKey(rec);
-      if (key) existing.add(key);
-    }
+  for (const rec of await listCollection(env, space, collection)) {
+    const extra = dedupeKey ? dedupeKey(rec) : '';
+    if (extra) existing.add(extra);
+    if (fingerprint) existing.add(docFingerprint(rec));
   }
-  const limit = Math.min(Array.isArray(docs) ? docs.length : 0, 5000);
-  for (let i = 0; i < limit; i += 1) {
-    const raw = docs[i];
-    if (!raw || typeof raw !== 'object') continue;
-    const key = dedupeKey ? dedupeKey(raw) : '';
-    if (key && existing.has(key)) {
-      stats.skipped += 1;
-      continue;
+
+  const now = Date.now();
+  const rows = [];
+  let skipped = 0;
+  let contactSeq = null;
+  for (const raw of list) {
+    const doc = sanitizeDoc(collection, raw);
+    if (dedupeKey) {
+      const extra = dedupeKey(doc);
+      if (extra && existing.has(extra)) {
+        skipped += 1;
+        continue;
+      }
+      if (extra) existing.add(extra);
     }
-    if (key) existing.add(key);
-    await createRecord(env, space, collection, raw, actor);
-    stats.added += 1;
+    if (fingerprint) {
+      const print = docFingerprint(doc);
+      if (existing.has(print)) {
+        skipped += 1;
+        continue;
+      }
+      existing.add(print);
+    }
+    let id;
+    if (def.autoId) {
+      if (contactSeq === null) {
+        const row = await env.DB.prepare(
+          `SELECT MAX(CAST(SUBSTR(id, 5) AS INTEGER)) AS n FROM records WHERE space = ? AND collection = 'contacts' AND id LIKE 'CNT-%'`,
+        )
+          .bind(space)
+          .first();
+        contactSeq = (row && row.n ? Number(row.n) : 0);
+      }
+      contactSeq += 1;
+      id = `CNT-${String(contactSeq).padStart(4, '0')}`;
+      doc.id = id;
+    } else {
+      const given = String((raw && raw.id) || '');
+      id = /^[A-Za-z0-9_-]{1,64}$/.test(given) ? given : crypto.randomUUID();
+    }
+    rows.push({ id, doc, stored: JSON.stringify(await protectDoc(env, collection, doc)) });
   }
-  return stats;
+
+  if (!rows.length) return { added: 0, skipped };
+
+  // One change row for the whole import, then every record in a single
+  // DB.batch() call — D1 runs a batch as one transaction, so a failed import
+  // leaves no half-written ledger behind.
+  const rev = await logChange(env, space, collection, 'bulk-import', 'upsert', actor);
+  const insert = `INSERT INTO records (space, collection, id, doc, rev, updated_at, updated_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(space, collection, id) DO UPDATE SET doc = excluded.doc, rev = excluded.rev,
+     updated_at = excluded.updated_at, updated_by = excluded.updated_by`;
+  await env.DB.batch(
+    rows.map((row) => env.DB.prepare(insert).bind(space, collection, row.id, row.stored, rev, now, actor || 'system')),
+  );
+  for (const row of rows) await afterWrite(env, space, collection, row.doc, row.id);
+  return { added: rows.length, skipped };
 }
 
 /* ---------------------------------------------------- state for the client */

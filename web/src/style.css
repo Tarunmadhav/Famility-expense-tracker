@@ -161,7 +161,8 @@ input.search { flex: 1 1 220px; min-width: 160px; }
 .minimember:hover { border-color: var(--mute); }
 .mmname { font-size: 11px; font-weight: 650; text-align: center; line-height: 1.2; }
 .mmrel { font-size: 10px; color: var(--mute); }
-.btn.wa { background: transparent; color: var(--ink); border-color: var(--line); }
+.importlist { margin: 0 0 10px; padding-left: 18px; max-height: 42vh; overflow: auto; font-size: 12.5px; line-height: 1.5; }
+.importlist li { margin-bottom: 2px; }
 .noteacts { display: flex; gap: 6px; margin-top: 5px; }
 
 /* -------------------------------------------------- auth, files, settings */

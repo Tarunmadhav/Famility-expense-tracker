@@ -1,0 +1,5 @@
+﻿Date,Expense / merchant,Category,Payment method,Amount,Status,Payee,Phone,Receipt / ref,Remarks
+04/03/2026,"Nilgiris ""big"" shop, weekly",Groceries,UPI,2450.5,Paid,Nilgiris,9840012345,R-1,"quoted, comma"
+05/03/2026,Auto fare,Travel,Cash,120,Paid,-,,,
+12/03/2026,KSEB bill,Utilities,Netbanking,3100,Unpaid,KSEB,,R-2,
+2026-03-13,Chemist,Health,Card,"1,23,456.00",Paid,Apollo,,,indian format

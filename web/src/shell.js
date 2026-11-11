@@ -187,7 +187,8 @@ export function tabbarHtml() {
     ${quick
       .map(([id, label, glyph]) => {
         if (id === 'add') {
-          return `<button class="tabitem fab" data-act="add" data-ek="${esc(defaultCollection())}" aria-label="Add a record"><span aria-hidden="true">+</span><small>Add</small></button>`;
+          // + offers exactly two things: one entry by hand, or a file.
+          return `<button class="tabitem fab" data-act="addsheet" aria-label="Add"><span aria-hidden="true">+</span><small>Add</small></button>`;
         }
         if (id === 'more') {
           return `<button class="tabitem${S.drawer ? ' on' : ''}" data-act="drawer" aria-label="More sections"><span aria-hidden="true">⋯</span><small>More</small>${
@@ -202,12 +203,6 @@ export function tabbarHtml() {
       })
       .join('')}
   </nav>`;
-}
-
-function defaultCollection() {
-  // Every profile kind starts a quick-add in its ledger; the form itself is the
-  // same, so there is nothing kind-specific to branch on.
-  return 'expenses';
 }
 
 export function titleFor(tab) {

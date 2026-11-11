@@ -14,7 +14,7 @@ import {
   csvAll,
   csvOf,
   csvTemplate,
-  docsFromCsv,
+  docsFromRows,
   download,
   googleContactsToDocs,
   notificationMessage,
@@ -1134,6 +1134,18 @@ document.addEventListener('click', async (event) => {
       return scanCurrentForm();
     case 'add':
       return openForm(collection, {}, true);
+    case 'addsheet':
+      document.getElementById('modal').innerHTML = views.addSheetHtml();
+      return undefined;
+    case 'addone': {
+      document.getElementById('modal').innerHTML = views.quickEntryHtml();
+      const amount = document.getElementById('q_amount');
+      if (amount) amount.focus();
+      return undefined;
+    }
+    case 'addimport':
+      document.getElementById('modal').innerHTML = '';
+      return importFile('expenses');
     case 'edit': {
       const row = (S.db[collection] || []).find((r) => r.id === id);
       if (row) openForm(collection, row, false);
@@ -1164,7 +1176,7 @@ document.addEventListener('click', async (event) => {
       download(`${COLLECTIONS[collection].label.replace(/\W+/g, '_')}.csv`, csvOf(collection), 'text/csv;charset=utf-8');
       return undefined;
     case 'impcsv':
-      return importCsv(collection);
+      return importFile(collection);
     case 'saveset':
       return saveSettings();
     case 'ics': {
@@ -1442,6 +1454,9 @@ document.addEventListener('change', async (event) => {
   } else if (form.id === 'frm') {
     event.preventDefault();
     await saveForm();
+  } else if (form.id === 'qfrm') {
+    event.preventDefault();
+    await saveQuickEntry();
   }
 });
 
@@ -1758,6 +1773,26 @@ async function saveForm() {
   });
 }
 
+/** Save the + sheet's short form. The book is a profile switch, not a field. */
+async function saveQuickEntry() {
+  const amount = Number((document.getElementById('q_amount') || {}).value);
+  const date = (document.getElementById('q_date') || {}).value || '';
+  const cat = ((document.getElementById('q_cat') || {}).value || '').trim();
+  const note = ((document.getElementById('q_note') || {}).value || '').trim();
+  const book = (document.getElementById('q_book') || {}).value || '';
+  if (!Number.isFinite(amount) || amount <= 0) return toast('Enter an amount above zero');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return toast('Pick a date');
+  // The ledger table shows the item first, so an entry with only a note still reads well.
+  const doc = { date, cat, amount, item: note || cat || 'Expense', remarks: note, status: 'Paid' };
+  await guard(async () => {
+    if (book && book !== S.profileId) await api.switchProfile(book);
+    await api.createRecord('expenses', doc);
+    document.getElementById('modal').innerHTML = '';
+    await refresh();
+    toast('Entry added');
+  });
+}
+
 async function changePin() {
   const current = document.getElementById('p_cur').value.trim();
   const next = document.getElementById('p_new').value.trim();
@@ -1856,31 +1891,72 @@ function messageFor(target) {
   return row ? recordMessage(collection, row) : alertDigestText();
 }
 
-/** Import a CSV: the module template format, or a Google Contacts export. */
-function importCsv(collection) {
+/**
+ * Import a CSV or Excel file: the module template format, or a Google Contacts
+ * export. The reader is loaded on demand so it stays out of the first paint.
+ */
+function importFile(collection) {
   const input = document.createElement('input');
   input.type = 'file';
-  input.accept = '.csv,text/csv';
+  input.accept = '.csv,.txt,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   input.onchange = () => {
     const file = input.files && input.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const text = String(reader.result || '');
-      let parsed = docsFromCsv(collection, text);
-      if ((!parsed.docs || !parsed.docs.length) && collection === 'contacts') {
-        parsed = googleContactsToDocs(text);
-      }
-      if (!parsed.docs || !parsed.docs.length) return toast(parsed.error || 'Nothing to import in that file');
-      await guard(async () => {
-        const stats = await api.bulkImport(collection, parsed.docs);
-        await refresh();
-        toast(`${stats.added} row${stats.added === 1 ? '' : 's'} imported${stats.skipped ? `, ${stats.skipped} duplicates skipped` : ''}`);
-      });
-    };
-    reader.readAsText(file, 'utf-8');
+    if (file) runImport(collection, file);
   };
   input.click();
+}
+
+async function runImport(collection, file) {
+  let sheets;
+  try {
+    sheets = await import('./sheets.js');
+  } catch {
+    return toast('Could not load the file reader. Reload the app and try again.');
+  }
+  let rows;
+  try {
+    ({ rows } = await sheets.readImportFile(file));
+  } catch (err) {
+    return showImportFailures(collection, file.name, [{ row: 0, message: err.message }], [], 0);
+  }
+  let parsed = docsFromRows(collection, rows);
+  if (parsed.errors.length && collection === 'contacts') {
+    // A Google Contacts export has its own column names; keep that path working.
+    const text = await file.text().catch(() => '');
+    const google = text ? googleContactsToDocs(text) : { docs: [] };
+    if (google.docs && google.docs.length) parsed = { docs: google.docs, errors: [], warnings: [], rows: google.docs.length };
+  }
+  if (parsed.errors.length) {
+    return showImportFailures(collection, file.name, parsed.errors, parsed.warnings || [], parsed.rows || 0);
+  }
+  await guard(async () => {
+    const stats = await api.bulkImport(collection, parsed.docs);
+    await refresh();
+    const added = Number(stats.added || 0);
+    const skipped = Number(stats.skipped || 0);
+    toast(
+      `${added} row${added === 1 ? '' : 's'} imported${skipped ? `, ${skipped} already there` : ''}` +
+        (parsed.warnings && parsed.warnings.length ? ` · ${parsed.warnings.length} shortened` : ''),
+    );
+  });
+}
+
+/** Row-level failures in a dialog: the line number, the column and the reason. */
+function showImportFailures(collection, fileName, errors, warnings, rowCount) {
+  const def = COLLECTIONS[collection];
+  const listed = errors.slice(0, 40);
+  const more = errors.length - listed.length;
+  document.getElementById('modal').innerHTML = `<div class="modal" data-act="close"><div class="box" data-stop="1" style="max-width:520px">
+    <h2 style="margin:0 0 6px">Nothing imported</h2>
+    <p class="mut" style="margin:0 0 10px">${esc(fileName)} · ${esc(def.label)}${rowCount ? ` · ${rowCount} data row${rowCount === 1 ? '' : 's'} read` : ''}</p>
+    <ul class="importlist">${listed
+      .map((e) => `<li>${e.row ? `<b>Line ${e.row}</b> ` : ''}${e.field ? `${esc(e.field)}: ` : ''}${esc(e.message)}</li>`)
+      .join('')}</ul>
+    ${more > 0 ? `<p class="mut">and ${more} more.</p>` : ''}
+    ${warnings && warnings.length ? `<p class="mut">${warnings.length} cell${warnings.length === 1 ? '' : 's'} would be shortened.</p>` : ''}
+    <p class="mut">Nothing was saved. Fix the rows in the file, or download the template, and try again.</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn g" data-act="close">Close</button><button class="btn" data-act="impcsv" data-ek="${esc(collection)}">Choose another file</button></div>
+  </div></div>`;
 }
 
 /* --------------------------------------------------------------- startup */
