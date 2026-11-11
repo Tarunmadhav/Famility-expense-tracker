@@ -365,7 +365,7 @@ export function settingsView() {
   <div class="card"><h2>Household &amp; alert settings</h2>
     <div class="fld"><label>Household name</label><input id="s_household" placeholder="e.g. Gudipati household" value="${esc(S.settings.household || '')}"></div>
     <div class="fld"><label>Daily alert time (used for calendar events)</label><input id="s_time" type="time" value="${esc(S.settings.alertTime || '06:00')}"></div>
-    <div class="fld"><label for="s_channel">Alert channel</label><select id="s_channel">${['Push + in-app', 'Telegram', 'All channels'].map((c) => `<option${c === (S.settings.channel || 'Push + in-app') ? ' selected' : ''}>${c}</option>`).join('')}</select></div>
+    <!-- alert channel field removed: nothing routes by it yet (docs/ROADMAP.md) --><div hidden><label for="s_channel">Alert channel</label><select id="s_channel">${['Push + in-app', 'Telegram', 'All channels'].map((c) => `<option${c === (S.settings.channel || 'Push + in-app') ? ' selected' : ''}>${c}</option>`).join('')}</select></div>
     <p class="mut">Alerts are shown in the app and pushed to your devices; Telegram is used for the chats you linked above.</p>
     <button class="btn" data-act="saveset">Save settings</button></div>
   <div class="card"><h2>Security</h2>
@@ -768,7 +768,7 @@ export function notificationsPanelHtml() {
   return `<div class="bellpanel" data-stop="1">
     <div class="bellhead"><b>Notifications</b><button class="btn s g" data-act="note-read">Mark all read</button></div>
     <div class="bellbody">${items.length
-      ? items.map((n) => `<div class="note ${n.read_at ? '' : 'unread'} lvl-${esc(n.level || 'info')}"><div class="ntitle">${esc(n.title)}</div><div class="nbody">${esc(n.body)}</div><div class="ntime mut">${esc(relative(n.created_at))}</div></div>`).join('')
+      ? items.map((n) => `<div class="noterow${n.read_at ? '' : ' unread'} lvl-${esc(n.level || 'info')}"><div class="nrhead"><b>${esc(n.title)}</b></div><div class="mut">${esc(n.body)}</div><div class="nrmeta"><span class="mut small">${esc(relative(n.created_at))}</span></div></div>`).join('')
       : '<div class="mut" style="padding:12px">No notifications yet.</div>'}</div>
     <div class="bellfoot"><button class="btn g" data-act="push-settings">Notification settings</button></div></div>`;
 }

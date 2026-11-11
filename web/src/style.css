@@ -167,13 +167,6 @@ input.search { flex: 1 1 220px; min-width: 160px; }
 .bellpanel { position: absolute; right: 12px; top: calc(100% - 4px); width: min(380px, calc(100vw - 24px)); background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 16px 40px rgba(9, 9, 11, .18); z-index: 30; overflow: hidden; }
 .bellhead { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .bellbody { max-height: 60vh; overflow: auto; }
-.note { padding: 9px 12px; border-bottom: 1px solid var(--line); border-left: 2px solid transparent; }
-.note.unread { border-left-color: var(--ink); background: var(--tint); }
-.note.lvl-high { border-left-color: var(--bad); }
-.note.lvl-medium { border-left-color: var(--warn); }
-.ntitle { font-weight: 600; font-size: 12.5px; }
-.nbody { font-size: 12px; color: var(--mute); }
-.ntime { font-size: 10.5px; margin-top: 2px; color: var(--mute); }
 .bellfoot { padding: 8px 12px; border-top: 1px solid var(--line); text-align: right; }
 
 /* ------------------------------------------------------------------ auth */

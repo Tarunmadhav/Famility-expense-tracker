@@ -1835,7 +1835,7 @@ async function saveSettings() {
   const settings = {
     household: value('s_household'),
     alertTime: document.getElementById('s_time').value || '06:00',
-    channel: document.getElementById('s_channel').value.trim(),
+    channel: (document.getElementById('s_channel') || {}).value || '',
   };
   await guard(async () => {
     const out = await api.saveSettings(settings);
