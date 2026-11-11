@@ -318,8 +318,10 @@ async function serveStatic(request, env, url) {
   }
   const out = securityHeaders(res);
   const path = url.pathname;
-  if (path.startsWith('/assets/')) {
-    // Vite fingerprints these filenames, so they can be cached for a year.
+  if (path.startsWith('/assets/') && out.status === 200) {
+    // Vite fingerprints these filenames, so a 200 can be cached for a year. A miss
+    // must not be: a single 404 cached as immutable bricks the app for a year, and
+    // renaming or re-uploading the file does not help once that is in the cache.
     out.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
   } else if (path === '/' || path === '/index.html') {
     // The shell names the hashed CSS and JS of exactly one build. If a cached copy
