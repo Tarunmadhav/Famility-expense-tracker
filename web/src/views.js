@@ -227,7 +227,10 @@ export function tableView(collection) {
     const rels = [...new Set((S.db.contacts || []).map((c) => c.rel).filter(Boolean))].sort();
     html += `<select data-f="rel"><option value="">All relationships</option>${rels.map((r) => `<option${S.filter.rel === r ? ' selected' : ''}>${esc(r)}</option>`).join('')}</select>`;
   }
-  html += `<button class="btn" style="background:${def.dark}" data-act="add" data-ek="${collection}">+ Add</button><button class="btn g" data-act="csv" data-ek="${collection}">Export</button><button class="btn g" data-act="template" data-ek="${collection}">Template</button><button class="btn g" data-act="impcsv" data-ek="${collection}">Import</button>`;
+  // The server refuses a contact import from any other account or book; hiding
+  // the button for them is only a convenience, not the check.
+  const canImport = collection !== 'contacts' || S.canImportContacts;
+  html += `<button class="btn" style="background:${def.dark}" data-act="add" data-ek="${collection}">+ Add</button><button class="btn g" data-act="csv" data-ek="${collection}">Export</button><button class="btn g" data-act="template" data-ek="${collection}">Template</button>${canImport ? `<button class="btn g" data-act="impcsv" data-ek="${collection}">Import</button>` : ''}`;
   html += `<span class="mut right">${total.toLocaleString('en-IN')} row${total === 1 ? '' : 's'}</span></div>`;
 
   html += `<div class="tw"><table style="--tint:${def.tint};--dark:${def.dark}"><thead><tr>`;

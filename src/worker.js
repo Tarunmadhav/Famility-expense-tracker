@@ -459,6 +459,22 @@ function assertSpaceCollection(space, collection) {
   }
 }
 
+/**
+ * Contact import is a one-off job for one account and one book, so the allowlist
+ * lives in two Worker vars: CONTACT_IMPORT_EMAIL and CONTACT_IMPORT_BOOK. They are
+ * server-side only (the client is told a boolean at most), and with either unset
+ * contact import is off for everybody rather than open to everybody.
+ */
+async function contactImportAllowed(env, session, space) {
+  const allowEmail = normaliseEmail(env.CONTACT_IMPORT_EMAIL || '');
+  const allowBook = String(env.CONTACT_IMPORT_BOOK || '').trim().toLowerCase();
+  if (!allowEmail || !allowBook || !space) return false;
+  const own = await credentialsFor(env, session.userId);
+  if (!own || normaliseEmail(own.email) !== allowEmail) return false;
+  const book = await env.DB.prepare(`SELECT name FROM profiles WHERE id = ?`).bind(space).first();
+  return Boolean(book && String(book.name || '').trim().toLowerCase() === allowBook);
+}
+
 const WRITE_LIMIT = 120;
 const WRITE_WINDOW_MS = 60_000;
 
@@ -1405,6 +1421,9 @@ async function handleApi(request, env, ctx, url) {
       profiles,
       profile: { id: profile.id, kind: profile.kind, name: profile.name, role: profile.role },
       permissions: ['view', 'create', 'update', 'delete', 'export', 'manage', 'share'],
+      // A boolean, never the address: the client only decides whether to show the
+      // Import button. The server check above is the real gate.
+      canImportContacts: await contactImportAllowed(env, session, space),
       version: APP_VERSION,
     });
   }
@@ -1475,6 +1494,11 @@ async function handleApi(request, env, ctx, url) {
     const collection = String(body.collection || '');
     if (!COLLECTIONS[collection]) throw new HttpError(400, 'Unknown collection');
     assertSpaceCollection(space, collection);
+    // A restore is this account's own backup coming back, not an import, so the
+    // allowlist only guards the import path.
+    if (collection === 'contacts' && body.restore !== true && !(await contactImportAllowed(env, session, space))) {
+      throw new HttpError(403, 'Contact import is not enabled for this account');
+    }
     const dedupeKey =
       collection === 'contacts'
         ? (doc) => {

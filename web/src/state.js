@@ -27,6 +27,7 @@ export function applyState(payload) {
   if (payload.settings) S.settings = payload.settings;
   if (payload.notifications) S.notifications = payload.notifications;
   if (typeof payload.unread === 'number') S.unread = payload.unread;
+  if (typeof payload.canImportContacts === 'boolean') S.canImportContacts = payload.canImportContacts;
   if (payload.me) S.me = payload.me;
   if (payload.pushPublicKey !== undefined) S.pushPublicKey = payload.pushPublicKey;
   if (typeof payload.rev === 'number') S.rev = payload.rev;
@@ -47,6 +48,8 @@ export const S = {
   pushEnabled: false,
   // Set from /api/auth/status: whether the deployment can send sign-in codes.
   emailEnabled: false,
+  // Whether this account may import contacts, decided by the server's allowlist.
+  canImportContacts: false,
   demo: null,
   tab: 'dashboard',
   q: {},

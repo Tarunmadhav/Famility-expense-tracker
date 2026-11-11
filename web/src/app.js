@@ -1184,6 +1184,10 @@ document.addEventListener('click', async (event) => {
       download(`${COLLECTIONS[collection].label.replace(/\W+/g, '_')}.csv`, csvOf(collection), 'text/csv;charset=utf-8');
       return undefined;
     case 'impcsv':
+      if (collection === 'contacts' && !S.canImportContacts) {
+        toast('Contact import is not enabled for this account');
+        return undefined;
+      }
       return importFile(collection);
     case 'saveset':
       return saveSettings();
