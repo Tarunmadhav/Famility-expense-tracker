@@ -74,6 +74,66 @@ column and the reason, and the whole file is refused rather than half-imported. 
 compared by content (contacts also by mobile number) — and the rows of one file are written in a
 single D1 transaction.
 
+### Contact formats
+
+Contacts accept two layouts. The format is detected from the header row, never from the file name,
+so a Google export works as `.csv` or `.xlsx`:
+
+| Planner field | App template column | Google Contacts export column |
+| --- | --- | --- |
+| Name | `Name` | `First Name` + `Middle Name` + `Last Name`, or `File As` when all three are empty (row skipped when both are empty) |
+| Relationship | `Relationship` | — no Google source, left empty |
+| Mobile | `Mobile` | the first of `Phone 1–3 - Value`, preferring a `Mobile`/`Cell` label |
+| Alternative | `Alternative` | the next distinct phone number after Mobile |
+| Email | `Email` | `E-mail 1 - Value`, otherwise `E-mail 2 - Value` |
+| Birthday | `Birthday` | `Birthday` |
+| Organisation | `Organisation` | `Organization Name`, otherwise `Organization Title` |
+| Linked module | `Linked module` | — no Google source, left empty |
+| Remarks | `Remarks` | `Notes` |
+
+Phone numbers are written in E.164 (`+919840012345`) when the file carries a country code; a number
+without one is kept exactly as written and listed for review rather than guessed at. A number with a
+`Mobile`/`Cell` label always wins over a landline.
+
+Reported but not imported from a Google export: `Name Prefix`, `Name Suffix`, `Nickname`, the three
+phonetic name columns, `Organization Department`, `Photo`, `Labels` (including the system
+`* myContacts` label), `Website 1 - Label`/`- Value` and every `Address 1`/`Address 2` column. The
+import toast says how many columns were left out.
+
+Duplicates inside one file, and rows already in the book, are skipped by the last ten digits of the
+phone number or by email — the same rule the server applies, so a second import adds nothing. A row
+with no name at all is skipped and counted. Limits are 2 MB, 500 data rows per file and 500 rows per
+batch; each batch is one D1 transaction, and a failed batch reports the rows it covered and writes
+none of them. A real import stops if more than 10% of the rows are rejected.
+
+The same mapping runs from the command line, through the app's own endpoint, with a dry run first:
+
+```
+node scripts/import-contacts.mjs --file "C:\path\contacts.csv" --email you@example.com --book Family
+node scripts/import-contacts.mjs --file "C:\path\contacts.csv" --email you@example.com --book Family --import
+```
+
+The password is read from `%USERPROFILE%\.ffp-keys\import-password.txt` (override with
+`--password-file`), never from the command line.
+
+### Telegram setup
+
+1. Talk to @BotFather, create the bot, copy its token.
+2. `cd /d "D:\family planner" && npx wrangler secret put TELEGRAM_BOT_TOKEN`
+3. `npx wrangler secret put TELEGRAM_WEBHOOK_SECRET` — any long random string. The webhook answers
+   **501** until this exists, so the bot can send but not reply.
+4. Set `TELEGRAM_BOT_USERNAME` in `wrangler.jsonc` (without the `@`) so Settings can link straight to
+   the chat, then `npx wrangler deploy`.
+5. Point Telegram at the Worker, reusing the same secret value:
+
+```
+curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" -d "url=https://family-finance-planner.tarungudipatimadhav.workers.dev/api/telegram/webhook" -d "secret_token=<WEBHOOK_SECRET>" -d "allowed_updates=[\"message\"]"
+```
+
+6. In the app: **Settings → Notifications → Connect Telegram**, then send `/link CODE` to the bot.
+   Commands: `/start`, `/link CODE`, `/status`, `/settings [generic|detailed]`, `/unlink`, `/help`.
+   Group chats are refused — a link belongs to one person's private chat. See `docs/TELEGRAM.md`.
+
 ## Data model
 
 `records(collection, id, doc JSON, rev, updated_at, updated_by)` holds the ten collections
