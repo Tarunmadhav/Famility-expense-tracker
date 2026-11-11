@@ -392,3 +392,31 @@ input.search { flex: 1 1 220px; min-width: 160px; }
 @media (min-width: 901px) {
   .only-mobile { display: none; }
 }
+
+/* ============================================================ status lines
+   Each integration shows exactly one line: not set up (owner action needed),
+   not connected, connected, or an error with the server's reason. The colour
+   keeps the same meaning in both themes, so it reads without the label. */
+.statusline { margin: 2px 0 6px; font-size: 12px; line-height: 1.45; color: var(--mute); }
+.statusline::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; background: var(--mute); }
+.statusline[data-state="on"] { color: var(--ok); }
+.statusline[data-state="on"]::before { background: var(--ok); }
+.statusline[data-state="setup"] { color: var(--warn); }
+.statusline[data-state="setup"]::before { background: var(--warn); }
+.statusline[data-state="error"] { color: var(--bad); }
+.statusline[data-state="error"]::before { background: var(--bad); }
+.mrow .statusline { margin: 0; }
+
+/* ---------------------------------------------------------------- spacing
+   One scale for vertical rhythm instead of ad-hoc 9/10/12/14 px margins, and
+   one primary button size that clears the 44px touch target on a phone. */
+:root { --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; }
+.card { padding: var(--sp-4); margin-bottom: var(--sp-3); }
+.card > h2 { margin-bottom: var(--sp-2); }
+.tools { gap: var(--sp-2); margin-bottom: var(--sp-2); }
+@media (max-width: 900px) {
+  .btn, .pchip, .tabitem, .nitem, .chipbtn, .iconbtn, .seg button, .linkbtn { min-height: 44px; }
+  .seg button, .linkbtn { display: inline-flex; align-items: center; justify-content: center; }
+  .btn.s, .btn.xs { min-height: 38px; }
+  td.act .btn { min-height: 38px; }
+}
