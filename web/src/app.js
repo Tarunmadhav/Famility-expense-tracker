@@ -425,12 +425,16 @@ async function refresh() {
   const payload = await api.getState(S.rev);
   const before = S.rev;
   applyState(payload);
-  if (S.tab === 'settings') await loadSettingsData();
+  const changed = S.rev !== before;
+  // Settings pulls twelve endpoints of its own. Refetching them on every 30s
+  // poll burned a dozen requests a tick for data that had not moved; the panel
+  // is re-read when it is opened and whenever a change actually lands.
+  if (S.tab === 'settings' && changed) await loadSettingsData();
   // A wake-up with no new revision used to tear down and rebuild the whole DOM,
   // which is what made long sessions feel like the app was freezing. Only repaint
   // when something actually changed.
-  if (S.rev !== before || S.tab === 'settings') render();
-  if (S.rev !== before) await checkPendingNotifications(false);
+  if (changed) render();
+  if (changed) await checkPendingNotifications(false);
 }
 
 async function checkPendingNotifications(initial) {
@@ -1276,16 +1280,30 @@ document.addEventListener('click', async (event) => {
   }
 });
 
+/*
+ * Typing used to repaint the whole shell — sidebar, top bar, tables — on every
+ * keystroke. The query is kept immediately (so it survives a tab switch) and the
+ * repaint is coalesced to one per frame burst.
+ */
+let searchPaint = 0;
+function paintSearchSoon() {
+  if (searchPaint) return;
+  searchPaint = requestAnimationFrame(() => {
+    searchPaint = 0;
+    render();
+  });
+}
+
 document.addEventListener('input', (event) => {
   const el = event.target;
   if (el.hasAttribute && el.hasAttribute('data-q')) {
     const collection = el.getAttribute('data-q');
     S.q[collection] = el.value;
     S.page[collection] = 0;
-    render();
+    paintSearchSoon();
   } else if (el.id === 'gsearch') {
     S.q[S.tab] = el.value;
-    render();
+    paintSearchSoon();
   }
 });
 
