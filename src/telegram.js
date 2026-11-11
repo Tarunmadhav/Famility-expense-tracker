@@ -24,6 +24,18 @@ export function telegramConfigured(env) {
   return Boolean(String(env.TELEGRAM_BOT_TOKEN || '').trim()) && telegramWebhookConfigured(env);
 }
 
+/**
+ * The public @username of the shared bot. It is not a secret — it is what people
+ * type into Telegram — so Settings can link straight to the chat instead of
+ * sending them off to guess which bot the deployment uses.
+ */
+export function botUsername(env) {
+  const raw = String(env.TELEGRAM_BOT_USERNAME || '')
+    .trim()
+    .replace(/^@/, '');
+  return /^[A-Za-z0-9_]{4,32}$/.test(raw) ? raw : '';
+}
+
 export function telegramWebhookConfigured(env) {
   return Boolean(String(env.TELEGRAM_WEBHOOK_SECRET || '').trim());
 }

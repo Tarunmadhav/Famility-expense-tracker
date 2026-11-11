@@ -16,6 +16,9 @@
     // must be added here before the app is published (see SECURITY.md).
     "ANDROID_SHA256": "95:21:80:E2:C9:6E:17:B1:40:C5:6B:5D:26:7E:E8:24:91:BC:11:DF:09:C5:76:EF:B0:C1:22:93:5A:B0:B6:2C",
     "GOOGLE_CLIENT_ID": "311970877046-vghniju6d2gi82sodd7dvjv2hcbk6v9h.apps.googleusercontent.com",
+    // Public @username of the shared Telegram bot (no @). Settings links straight
+    // to https://t.me/<this>, so people never have to search for the bot.
+    "TELEGRAM_BOT_USERNAME": "FamilyFinancePlanner_bot",
     // Resend sender. Empty falls back to Resend own onboarding address, which only
     // delivers to the account owner.
     "MAIL_FROM": ""

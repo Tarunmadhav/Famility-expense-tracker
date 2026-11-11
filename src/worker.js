@@ -93,6 +93,7 @@ import {
 } from './oauth.js';
 import {
   assertTelegramConfigured,
+  botUsername,
   createLinkCode,
   deliverPending,
   handleUpdate,
@@ -1159,6 +1160,8 @@ async function handleApi(request, env, ctx, url) {
     const link = await linkForUser(env, session.userId);
     return json({
       configured: telegramConfigured(env),
+      // Public, so Settings can offer a real link to the chat.
+      botUsername: botUsername(env),
       // The app shows exactly which secret the owner still has to add.
       missing: telegramMissing(env),
       link: link
@@ -1477,7 +1480,12 @@ async function handleApi(request, env, ctx, url) {
             return digits.length >= 10 ? digits.slice(-10) : '';
           }
         : null;
-    const stats = await bulkCreate(env, space, collection, body.docs || [], session.userId, dedupeKey);
+    // A restore merges by id on purpose; an import must not double the ledger, so
+    // it also skips rows whose content is already there.
+    const stats = await bulkCreate(env, space, collection, body.docs || [], session.userId, {
+      dedupeKey,
+      fingerprint: body.restore !== true,
+    });
     if (body.restore === true) {
       await audit(env, {
         action: 'data.restore',

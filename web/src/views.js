@@ -3,13 +3,25 @@
 import { COLLECTIONS } from './entities.js';
 import { S } from './state.js';
 import { billAlert, bdayNext, insStatus, kpis, selfC, sum } from './analytics.js';
-import { digits, dfmt, esc, daysTo, money, num, stat } from './format.js';
+import { digits, dfmt, esc, daysTo, iso, money, num, stat, today } from './format.js';
 import {
   googleCalendarLink,
   notificationMessage,
   recordMessage,
 
 } from './exporters.js';
+
+/**
+ * A real link to the shared Telegram bot. The username is a public Worker var,
+ * so the card never asks people to go and find the bot by hand; the Android app
+ * hands the t.me URL to the Telegram client because it is a foreign host.
+ */
+function tgChatLink(tg) {
+  const user = String((tg && tg.botUsername) || '').replace(/^@/, '');
+  if (!/^[A-Za-z0-9_]{4,32}$/.test(user)) return '';
+  const linked = Boolean(tg && tg.link);
+  return `<a class="btn${linked ? ' g' : ''}" href="https://t.me/${esc(user)}" target="_blank" rel="noopener">${linked ? 'Open chat' : 'Start chatting'}</a>`;
+}
 
 export function headerSub() {
   const k = kpis();
@@ -191,7 +203,7 @@ export function tableView(collection) {
     const rels = [...new Set((S.db.contacts || []).map((c) => c.rel).filter(Boolean))].sort();
     html += `<select data-f="rel"><option value="">All relationships</option>${rels.map((r) => `<option${S.filter.rel === r ? ' selected' : ''}>${esc(r)}</option>`).join('')}</select>`;
   }
-  html += `<button class="btn" style="background:${def.dark}" data-act="add" data-ek="${collection}">+ Add</button><button class="btn g" data-act="csv" data-ek="${collection}">Export</button><button class="btn g" data-act="template" data-ek="${collection}">Template</button><button class="btn g" data-act="impcsv" data-ek="${collection}">Import CSV</button>`;
+  html += `<button class="btn" style="background:${def.dark}" data-act="add" data-ek="${collection}">+ Add</button><button class="btn g" data-act="csv" data-ek="${collection}">Export</button><button class="btn g" data-act="template" data-ek="${collection}">Template</button><button class="btn g" data-act="impcsv" data-ek="${collection}">Import</button>`;
   html += `<span class="mut right">${total.toLocaleString('en-IN')} row${total === 1 ? '' : 's'}</span></div>`;
 
   html += `<div class="tw"><table style="--tint:${def.tint};--dark:${def.dark}"><thead><tr>`;
@@ -360,7 +372,8 @@ export function settingsView() {
   <h2 class="grouphead">Notifications</h2>
   <div class="card" id="card-telegram"><h2>Telegram</h2>
     ${(!S.telegram || S.telegram.configured === false)
-      ? `<p class="hint mut">Not set up yet — owner action needed: add <code>${esc(((S.telegram && S.telegram.missing) || ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET']).join(', '))}</code> as ${(((S.telegram && S.telegram.missing) || []).length === 1 ? 'a Worker secret' : 'Worker secrets')} and point the bot's webhook at <code>/api/telegram/webhook</code>.</p>`
+      ? `<p class="hint mut">Not set up yet — owner action needed: add <code>${esc(((S.telegram && S.telegram.missing) || ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET']).join(', '))}</code> as ${(((S.telegram && S.telegram.missing) || []).length === 1 ? 'a Worker secret' : 'Worker secrets')} and point the bot's webhook at <code>/api/telegram/webhook</code>.</p>
+          <div class="tools">${tgChatLink(S.telegram)}</div>`
       : S.telegram.link
         ? `<div class="mrow"><span>Connected chat</span><b>${esc(S.telegram.link.username ? `@${S.telegram.link.username}` : S.telegram.link.telegramUserId || 'Telegram')}</b></div>
           <div class="mrow"><span>Linked</span><b>${esc(relative(S.telegram.link.linkedAt))}</b></div>
@@ -372,10 +385,10 @@ export function settingsView() {
             </select>
           </div>
           <div class="tools"><button class="btn s" data-act="tg-preview">Save preference</button>
-            <button class="btn s r" data-act="tg-unlink">Disconnect</button></div>`
+            <button class="btn s r" data-act="tg-unlink">Disconnect</button>${tgChatLink(S.telegram)}</div>`
         : `<p class="mut" style="margin-top:0">Get planner alerts — bills due, renewals, tasks and birthdays — in Telegram. One bot serves every household; only a chat you link here receives your alerts, and disconnecting stops them immediately.</p>
-          <p class="mut">1. Open the planner bot in Telegram (the one whose token this deployment uses).<br>2. Press <b>Connect Telegram</b> below and send the code to the bot.<br>3. The code works once and expires in 10 minutes.</p>
-          <button class="btn" data-act="tg-link">Connect Telegram</button>
+          <p class="mut">1. Press <b>Start chatting</b> to open the planner bot in Telegram.<br>2. Press <b>Connect Telegram</b> below, then send the code to the bot.<br>3. The code works once and expires in 10 minutes.</p>
+          <div class="tools">${tgChatLink(S.telegram)}<button class="btn g" data-act="tg-link">Connect Telegram</button></div>
           ${S.telegramCode ? `<div class="alerts" data-stop="1">Send <b>/link ${esc(S.telegramCode)}</b> to the bot. It works once and expires in 10 minutes.</div>` : ''}`}
     <p class="hint mut">Commands: <code>/start</code>, <code>/link CODE</code>, <code>/status</code>, <code>/settings</code>, <code>/unlink</code>, <code>/help</code>.</p>
   </div>
@@ -545,6 +558,37 @@ export function formHtml(collection, record, isNew) {
   });
   html += `<div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" class="btn g" data-act="close">Cancel</button><button class="btn" style="background:${def.dark}">Save</button></div></form></div></div>`;
   return html;
+}
+
+/* ------------------------------------------------------------- quick add */
+
+/** The two things the + button does, and nothing else. */
+export function addSheetHtml() {
+  const book = S.profile ? esc(S.profile.name) : 'this book';
+  return `<div class="modal" data-act="close"><div class="box" data-stop="1" style="max-width:420px">
+    <h2 style="margin:0 0 4px">Add to ${book}</h2>
+    <p class="mut" style="margin:0 0 12px">One entry by hand, or a CSV/Excel file.</p>
+    <button class="btn wide" data-act="addone" style="margin-bottom:8px">Add one entry</button>
+    <button class="btn g wide" data-act="addimport">Import CSV or Excel</button>
+    <div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn g s" data-act="close">Cancel</button></div>
+  </div></div>`;
+}
+
+/** A short entry form: amount, date, category, note, book. */
+export function quickEntryHtml() {
+  const books = (S.profiles || []).filter((p) => p.role !== 'Viewer');
+  const options = (books.length ? books : S.profiles || [])
+    .map((p) => `<option value="${esc(p.id)}"${p.id === S.profileId ? ' selected' : ''}>${esc(p.name)}</option>`)
+    .join('');
+  return `<div class="modal" data-act="close"><div class="box" data-stop="1">
+    <h2 style="margin:0 0 10px">Add one entry</h2><form id="qfrm">
+      <div class="fld"><label for="q_amount">Amount</label><input id="q_amount" type="number" step="any" inputmode="decimal" placeholder="0"></div>
+      <div class="fld"><label for="q_date">Date</label><input id="q_date" type="date" value="${esc(iso(today()))}"></div>
+      <div class="fld"><label for="q_cat">Category</label><input id="q_cat" type="text" placeholder="Groceries"></div>
+      <div class="fld"><label for="q_note">Note</label><input id="q_note" type="text" placeholder="Optional"></div>
+      <div class="fld"><label for="q_book">Book</label><select id="q_book">${options}</select></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" class="btn g" data-act="close">Cancel</button><button class="btn" style="background:${COLLECTIONS.expenses.dark}">Save</button></div>
+    </form></div></div>`;
 }
 
 /* ---------------------------------------------------------------- auth ui */
@@ -756,7 +800,7 @@ export function familyView() {
       <button class="btn" style="background:${COLLECTIONS.family.dark}" data-act="add" data-ek="family">+ Add member</button>
       <button class="btn g" data-act="csv" data-ek="family">Export</button>
       <button class="btn g" data-act="template" data-ek="family">Template</button>
-      <button class="btn g" data-act="impcsv" data-ek="family">Import CSV</button>
+      <button class="btn g" data-act="impcsv" data-ek="family">Import</button>
       <span class="mut right">${members.length} member${members.length === 1 ? '' : 's'}</span></div>
       <p class="mut" style="margin:0">Add each family member once — they then appear in alerts, birthdays and insurance nominees.</p></div>
     <div class="members">${members.map(memberCard).join('') || '<div class="card mut">No family members yet — add the first one with “+ Add member”.</div>'}</div>`;

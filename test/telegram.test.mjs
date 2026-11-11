@@ -382,3 +382,17 @@ test('linking and commands are rate limited per Telegram user', async () => {
   assert.ok(sent.length < 31, 'the rate limiter never engaged');
   assert.ok(sent.length >= 25);
 });
+
+test('the card can link straight to the bot, and a bad username is dropped', async () => {
+  const { env } = await setup({ TELEGRAM_BOT_USERNAME: '@FamilyFinancePlanner_bot' });
+  const { cookie } = await signup(env, 'tg-user@example.com');
+  const state = await call(env, '/api/telegram', { cookie });
+  assert.equal(state.status, 200);
+  // Leading @ and case are Telegram's, not ours: the link needs it without the @.
+  assert.equal(state.data.botUsername, 'FamilyFinancePlanner_bot');
+
+  const bad = await setup({ TELEGRAM_BOT_USERNAME: 'not a username' });
+  const badUser = await signup(bad.env, 'tg-bad@example.com');
+  const badState = await call(bad.env, '/api/telegram', { cookie: badUser.cookie });
+  assert.equal(badState.data.botUsername, '');
+});

@@ -22,7 +22,12 @@ Code: `src/telegram.js` (linking, delivery, commands) and the
    npx wrangler secret put TELEGRAM_BOT_TOKEN
    ```
 
-3. Invent a long random string for `TELEGRAM_WEBHOOK_SECRET` (32+ characters is
+3. Put that public username (without the `@`) into `TELEGRAM_BOT_USERNAME` in
+   `wrangler.jsonc`. It is not a secret; Settings uses it to open
+   `https://t.me/<username>` when someone presses **Start chatting**, so keep it
+   in step with BotFather when the bot is renamed.
+
+4. Invent a long random string for `TELEGRAM_WEBHOOK_SECRET` (32+ characters is
    plenty). Telegram sends it back on every update, and the Worker rejects any
    request that does not carry it:
 
@@ -37,7 +42,7 @@ Code: `src/telegram.js` (linking, delivery, commands) and the
    node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
    ```
 
-4. Deploy, then register the webhook. `setWebhook` needs the bot token, so run it
+5. Deploy, then register the webhook. `setWebhook` needs the bot token, so run it
    from a terminal where you paste the token into the environment for that one
    command (`set` in cmd.exe) rather than into a file:
 
@@ -49,7 +54,7 @@ Code: `src/telegram.js` (linking, delivery, commands) and the
 
    The reply is `{"ok":true,"result":true,"description":"Webhook was set"}`.
 
-5. Check it took:
+6. Check it took:
 
    ```cmd
    curl -s "https://api.telegram.org/bot%TELEGRAM_BOT_TOKEN%/getWebhookInfo"
@@ -65,7 +70,8 @@ Code: `src/telegram.js` (linking, delivery, commands) and the
 1. Sign in to the planner.
 2. **Settings → Notifications → Telegram → Connect Telegram**. A ten-character
    code appears.
-3. Open the bot in Telegram and send `/link <code>` (a bare code works too).
+3. Press **Start chatting** in the card — it opens `https://t.me/<TELEGRAM_BOT_USERNAME>` —
+   and send `/link <code>` (a bare code works too).
 4. The reply is `Connected...`. The card now shows the chat and the preference.
 
 Rules enforced by the Worker, not the UI:
@@ -125,6 +131,7 @@ Commands are limited to 30 per minute per Telegram user, and updates are
 deduplicated by `update_id`, so Telegram's retries are harmless.
 
 ## 6. `TELEGRAM_CHAT_ID`
+
 
 `TELEGRAM_CHAT_ID` exists **only** for an owner-run smoke test (send one message
 to your own chat to prove the token works). Nothing in `src/` reads it: delivery
