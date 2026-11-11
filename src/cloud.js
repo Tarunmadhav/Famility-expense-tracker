@@ -32,6 +32,8 @@ export function providerInfo(env) {
     id,
     label: p.label,
     configured: Boolean(env[p.clientIdKey] && env[p.clientSecretKey]),
+    // Names only, never values: the card names exactly what the owner must add.
+    missing: [p.clientIdKey, p.clientSecretKey].filter((key) => !env[key]),
     scope: p.scope,
   }));
 }

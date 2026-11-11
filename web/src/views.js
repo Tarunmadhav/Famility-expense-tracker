@@ -372,7 +372,7 @@ export function settingsView() {
   <h2 class="grouphead">Notifications</h2>
   <div class="card" id="card-telegram"><h2>Telegram</h2>
     ${(!S.telegram || S.telegram.configured === false)
-      ? `<p class="hint mut">Not set up yet — owner action needed: add <code>${esc(((S.telegram && S.telegram.missing) || ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET']).join(', '))}</code> as ${(((S.telegram && S.telegram.missing) || []).length === 1 ? 'a Worker secret' : 'Worker secrets')} and point the bot's webhook at <code>/api/telegram/webhook</code>.</p>
+      ? `<p class="hint mut"><b>Not set up yet: owner action needed</b> — add <code>${esc(((S.telegram && S.telegram.missing) || ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET']).join(', '))}</code> as ${(((S.telegram && S.telegram.missing) || []).length === 1 ? 'a Worker secret' : 'Worker secrets')} and point the bot's webhook at <code>/api/telegram/webhook</code>.</p>
           <div class="tools">${tgChatLink(S.telegram)}</div>`
       : S.telegram.link
         ? `<div class="mrow"><span>Connected chat</span><b>${esc(S.telegram.link.username ? `@${S.telegram.link.username}` : S.telegram.link.telegramUserId || 'Telegram')}</b></div>
@@ -425,7 +425,7 @@ export function settingsView() {
       const runs = (S.backupRuns || []).filter((r) => r.provider === p.id);
       const files = (S.backupFiles || {})[p.id] || null;
       return `<div class="mrow"><span><b>${esc(p.label)}</b><br>
-        <span class="mut">${p.linkedAt ? `Connected ${relativetimeFrom(p.linkedAt)}` : p.configured ? 'Not connected' : 'Not set up (owner action needed)'}</span></span>
+        <span class="mut">${p.linkedAt ? `Drive connected · ${relativetimeFrom(p.linkedAt)}` : p.configured ? 'Not connected' : `Google setup incomplete (owner action needed: ${esc((p.missing || ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']).join(', '))})`}</span></span>
         <b>${p.lastBackupAt ? `Last backup ${relativetimeFrom(p.lastBackupAt)}` : p.configured ? (p.linkedAt ? 'No backup yet' : '—') : '—'}</b>
         <span class="act">
           ${p.linkedAt
@@ -433,8 +433,8 @@ export function settingsView() {
                <button class="btn s g" data-act="cloud-list" data-id="${esc(p.id)}">Restore…</button>
                <button class="btn s r" data-act="cloud-unlink" data-id="${esc(p.id)}">Disconnect</button>`
             : p.configured
-              ? `<button class="btn s" data-act="cloud-link" data-id="${esc(p.id)}">Connect</button>`
-              : '<span class="mut" style="font-size:12px">Not set up (owner action needed)</span>'}
+              ? `<button class="btn s" data-act="cloud-link" data-id="${esc(p.id)}">Connect Google Drive</button>`
+              : '<span class="mut" style="font-size:12px">Not set up</span>'}
         </span>
       </div>
       ${files
@@ -451,11 +451,16 @@ export function settingsView() {
         : ''}`;
     }).join('')}
     ${(S.cloud || []).some((p) => !p.configured)
-      ? `<p class="hint mut">Not set up — owner action needed: <code>GOOGLE_CLIENT_ID</code> in <code>wrangler.jsonc</code> and
-          <code>GOOGLE_CLIENT_SECRET</code> as a Worker secret.</p>`
+      ? `<p class="hint mut"><b>Google setup incomplete (owner action needed)</b> — add
+          <code>${esc(
+            (S.cloud || [])
+              .flatMap((p) => p.missing || [])
+              .filter((v, i, a) => a.indexOf(v) === i)
+              .join('</code>, <code>'),
+          )}</code>.</p>`
       : ''}
     ${S.backupKeyConfigured === false
-      ? '<p class="hint mut"><b>Backup key not set (owner action needed)</b> — without <code>BACKUP_KEY</code> a refresh token cannot be stored encrypted, so a drive cannot be connected.</p>'
+      ? '<p class="hint mut"><b>Backup key not set (owner action needed: BACKUP_KEY)</b> — without it a refresh token cannot be stored encrypted, so a drive cannot be connected.</p>'
       : ''}
 
     <h3 style="margin:16px 0 6px;font-size:15px">Automatic backup</h3>
@@ -621,7 +626,10 @@ function socialButtonsHtml() {
   return `<div class="divider"><span>or continue with</span></div>
     <div class="tools" style="justify-content:center;flex-wrap:wrap">
       ${providers
-        .map((p) => `<button type="button" class="btn g" data-act="oauth" data-id="${esc(p.id)}">${esc(p.label)}</button>`)
+        .map((p) => {
+          const label = p.id === 'google' ? 'Continue with Google' : `Continue with ${p.label}`;
+          return `<button type="button" class="btn g" data-act="oauth" data-id="${esc(p.id)}">${esc(label)}</button>`;
+        })
         .join('')}
     </div>`;
 }

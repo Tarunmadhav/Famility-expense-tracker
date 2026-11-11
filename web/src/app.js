@@ -279,11 +279,15 @@ async function boot() {
     // with an email is a normal first step, and the setup card is offered as a
     // link from the same page.
     S.configured = Boolean(status.configured);
+    // Providers and the email sender are read by the sign-in screen itself, so they
+    // have to be stored before the signed-out early return. They used to be assigned
+    // only for a signed-in account, which meant "Continue with Google" could never
+    // appear on the one screen that needs it.
+    S.authProviders = status.providers || [];
+    S.emailEnabled = Boolean(status.email);
     if (!status.user) return setView('login');
     S.me = status.user;
     S.pushPublicKey = status.push ? S.pushPublicKey : null;
-    S.authProviders = status.providers || [];
-    S.emailEnabled = Boolean(status.email);
     // The update check is a second round-trip that nothing on screen waits for, so
     // it runs after the planner is painted instead of in front of it.
     loadApp().then(() => applyDeepLinkProfile());
@@ -1920,8 +1924,10 @@ async function runImport(collection, file) {
     return showImportFailures(collection, file.name, [{ row: 0, message: err.message }], [], 0);
   }
   let parsed = docsFromRows(collection, rows);
-  if (parsed.errors.length && collection === 'contacts') {
+  if (parsed.errors.length && collection === 'contacts' && !/\.(xlsx|xlsm)$/i.test(file.name || '')) {
     // A Google Contacts export has its own column names; keep that path working.
+    // Only CSV: reading an .xlsx as text gives binary noise, which the contacts
+    // reader would happily turn into junk rows.
     const text = await file.text().catch(() => '');
     const google = text ? googleContactsToDocs(text) : { docs: [] };
     if (google.docs && google.docs.length) parsed = { docs: google.docs, errors: [], warnings: [], rows: google.docs.length };
