@@ -415,6 +415,24 @@ ten minutes and is stored only as a hash; one Telegram identity per planner acco
 identity; the webhook rejects any request whose `X-Telegram-Bot-Api-Secret-Token` does not match; the
 default alert is a generic "You have a new planner alert" and amounts are opt-in per chat.
 
+### Bot commands (paste into @BotFather)
+
+Telegram keeps its own command list; this repository cannot change it. Copy this
+into @BotFather so the menu matches the code (`src/telegram.js`):
+
+```
+start - open the bot and see whether this chat is connected
+link - connect this chat to your planner with a code from the app
+status - what this chat is connected to
+settings - how much alerts show
+unlink - stop all messages to this chat
+help - the command list
+```
+
+Once a chat is linked, `/verify`, `/request`, `/upload` and `/logout` also work.
+`/verify` is what unlocks `/request` and `/upload`, so they are extras on top of
+the six above rather than replacements for them.
+
 ## Migrations
 
 Schema changes live in `src/migrations/index.js` and run through the app's own runner
@@ -427,10 +445,21 @@ fails on some Node versions. To see what is applied, ask D1 directly:
 cd /d "D:\family planner" && npx wrangler d1 execute family-planner --remote --command "SELECT id FROM schema_migrations ORDER BY id DESC LIMIT 5"
 ```
 
-## Owner secret checklist
+## Owner setup checklist
 
 Deploy the Worker first (`npx wrangler deploy`), then set only the secrets that are missing. Names are
-listed, never values; `npx wrangler secret list` prints the same list without them.
+listed, never values; `npx wrangler secret list` prints the same list without them. Each one is set
+from the project root with `npx wrangler secret put NAME`; nothing lives in the repository.
+
+**Still waiting on the owner.** Each of these blocks one feature; none blocks the app itself.
+
+| Waiting on | Blocks | Why code cannot finish it |
+| --- | --- | --- |
+| Approval for an APK build | the notification-permission line, in-app reminders on a phone, biometric unlock | the shell changed; nothing is built or signed without approval |
+| `android/app/google-services.json` | alerts while the app is closed (FCM) | needs a Firebase project for the package `com.family.planner` |
+| The bot token and webhook secret saved to `%USERPROFILE%\.ffp-keys\` | `setWebhook` / `getWebhookInfo` verification | secrets must never pass through chat |
+| A Google OAuth client with the callback URL registered | Google Drive and Google sign-in | external console work |
+| A verified `MAIL_FROM` domain | email codes to anyone other than the Resend account owner | needs a verified sending domain |
 
 | Name | Kind | Needed for | Set with |
 | --- | --- | --- | --- |
