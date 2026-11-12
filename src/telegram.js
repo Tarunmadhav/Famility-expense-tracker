@@ -18,6 +18,8 @@ const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 10;
 const CODE_TTL_MS = 10 * 60_000;
 const MAX_ATTEMPTS = 4;
+// How long one drain owns a delivery row before another may retry it.
+const SEND_LEASE_MS = 5 * 60_000;
 const GENERIC_TEXT = 'You have a new planner alert. Open the app to view it.';
 
 /** A bot without a webhook secret can send but never receive, so it is not usable. */
@@ -341,12 +343,17 @@ export async function deliverPending(env, { limit = 20, fetchImpl = fetch, now =
 
     let pending = 0;
     for (const link of links) {
-      // Claim the pair. A retried event cannot send the same alert twice.
+      // Claim the pair. A retried event cannot send the same alert twice, and the
+      // row doubles as a lease: two drains can run at once (a write's background
+      // task and the cron), and without a lease the second one used to read the
+      // row as merely 'pending' and send the same alert again. A claim that is
+      // still inside its lease is left to its owner; when the process dies mid
+      // send, the lease expires and the next drain retries it.
       const claim = await env.DB.prepare(
         `INSERT OR IGNORE INTO telegram_deliveries (notification_id, link_id, status, attempts, next_try)
-         VALUES (?, ?, 'pending', 0, 0)`,
+         VALUES (?, ?, 'pending', 0, ?)`,
       )
-        .bind(event.id, link.id)
+        .bind(event.id, link.id, now + SEND_LEASE_MS)
         .run();
       if (!((claim.meta && claim.meta.changes) || 0)) {
         const existing = await env.DB.prepare(
@@ -359,6 +366,7 @@ export async function deliverPending(env, { limit = 20, fetchImpl = fetch, now =
           continue;
         }
         if (Number(existing.next_try) > now) {
+          // Someone else is sending it right now, or it is backing off.
           pending += 1;
           continue;
         }
