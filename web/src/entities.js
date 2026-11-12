@@ -164,6 +164,12 @@ export const COLLECTIONS = {
       F('priority', 'Priority', 'select', ['High', 'Medium', 'Low']),
       F('status', 'Status', 'select', ['Pending', 'Incomplete', 'Completed']),
       F('due', 'Due date (calendar)', 'date'),
+      // The clock time is optional: no time means an all-day deadline.
+      F('dueTime', 'Due time (optional)', 'time'),
+      // Derived by the app from due + dueTime in the device's zone, stored as a
+      // UTC instant so the server can compare it with its own clock. Not shown
+      // in the form or the table: it is the same fact as the two fields above.
+      F('dueAt', 'Due (UTC)', 'hidden'),
       F('remarks', 'Remarks', 'area', null, 400),
     ],
   },
@@ -213,6 +219,17 @@ export function coerce(field, raw) {
       if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
       if (/^--\d{2}-\d{2}$/.test(s)) return s;
       return '';
+    }
+    case 'time': {
+      const s = String(raw).trim();
+      return /^([01]\d|2[0-3]):[0-5]\d$/.test(s) ? s : '';
+    }
+    case 'hidden': {
+      // An instant, always stored normalised, and never a date-only string.
+      const s = String(raw).trim();
+      if (!s) return '';
+      const parsed = Date.parse(s);
+      return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
     }
     case 'select':
       return field.o.includes(String(raw)) ? String(raw) : field.o[0];

@@ -1,6 +1,15 @@
 // Rendering. Pure functions that read S and return HTML strings; app.js wires events.
 
 import { COLLECTIONS } from './entities.js';
+import { deadlineItems } from './deadlines.js';
+
+/*
+ * Closed-app push needs Firebase Cloud Messaging, which needs
+ * android/app/google-services.json. That file is not in this repository, so the
+ * APK cannot deliver an alert while it is closed, and Settings says so instead of
+ * implying otherwise. Flip this when the file and the FCM credentials exist.
+ */
+const CLOSED_APP_PUSH = 'Push is not set up: owner action needed (google-services.json)';
 import { S } from './state.js';
 import { billAlert, bdayNext, insStatus, kpis, selfC, sum } from './analytics.js';
 import { digits, dfmt, esc, daysTo, iso, money, num, stat, today } from './format.js';
@@ -21,6 +30,32 @@ function tgChatLink(tg) {
   if (!/^[A-Za-z0-9_]{4,32}$/.test(user)) return '';
   const linked = Boolean(tg && tg.link);
   return `<a class="btn${linked ? ' g' : ''}" href="https://t.me/${esc(user)}" target="_blank" rel="noopener">${linked ? 'Open chat' : 'Start chatting'}</a>`;
+}
+
+/**
+ * The deadline strip at the top of the app: overdue first, then anything due in
+ * the next 24 hours, then anything due later today. Amounts never appear here —
+ * a deadline is a time, not a balance — and the strip is absent when nothing is
+ * due. Each row opens the task it names.
+ */
+export function deadlineBannerHtml(items) {
+  const list = items || deadlineItems(S.db && S.db.diary, Date.now());
+  if (!list.length) return '';
+  const late = list.filter((i) => i.overdue).length;
+  return `<section class="deadlines" aria-label="Deadlines">
+      <div class="deadlinehead">
+        <b>${late ? `${late} overdue` : 'Due soon'}</b>
+        <span class="mut">${list.length} task${list.length === 1 ? '' : 's'}</span>
+      </div>
+      ${list
+        .map(
+          (i) => `<button class="deadline${i.overdue ? ' late' : ''}" data-act="edit" data-ek="diary" data-id="${esc(i.id)}">
+            <span class="dltitle">${esc(i.title)}</span>
+            <span class="dltime">${i.allDay ? 'All day' : esc(i.clock)}${i.overdue ? ' · overdue' : ''}</span>
+          </button>`,
+        )
+        .join('')}
+    </section>`;
 }
 
 /**
@@ -248,8 +283,11 @@ export function tableView(collection) {
   html += `<button class="btn" style="background:${def.dark}" data-act="add" data-ek="${collection}">+ Add</button><button class="btn g" data-act="csv" data-ek="${collection}">Export</button><button class="btn g" data-act="template" data-ek="${collection}">Template</button><button class="btn g" data-act="impcsv" data-ek="${collection}">Import</button>`;
   html += `<span class="mut right">${total.toLocaleString('en-IN')} row${total === 1 ? '' : 's'}</span></div>`;
 
+  // Fields of type 'hidden' carry the derived UTC instant; they are the same
+  // fact as the date and time shown here, so they get no column of their own.
+  const cols = def.fields.filter((f) => f.t !== 'hidden');
   html += `<div class="tw"><table style="--tint:${def.tint};--dark:${def.dark}"><thead><tr>`;
-  def.fields.forEach((f) => {
+  cols.forEach((f) => {
     const arrow = sort && sort.k === f.k ? (sort.dir > 0 ? ' ▲' : ' ▼') : '';
     html += `<th data-sort="${f.k}" data-ek="${collection}">${esc(f.l)}${arrow}</th>`;
   });
@@ -258,7 +296,7 @@ export function tableView(collection) {
 
   visible.forEach(({ r }) => {
     html += '<tr>';
-    def.fields.forEach((f) => { html += cellHtml(f, r[f.k]); });
+    cols.forEach((f) => { html += cellHtml(f, r[f.k]); });
     computedColumns(collection, r).forEach((c) => { html += `<td${c.badge ? '' : ' class="num"'}>${c.badge ? stat(c.v) : esc(c.v === '' ? '' : c.v)}</td>`; });
     html += '<td class="act">';
     if (DONE_BUTTON[collection] && r.status !== DONE_BUTTON[collection]) {
@@ -270,7 +308,7 @@ export function tableView(collection) {
     html += `<button class="btn s g" data-act="edit" data-ek="${collection}" data-id="${esc(r.id)}">Edit</button> <button class="btn s r" data-act="del" data-ek="${collection}" data-id="${esc(r.id)}">✕</button></td></tr>`;
   });
   if (!visible.length) {
-    html += `<tr><td colspan="${def.fields.length + (COMPUTED_HEADERS[collection] || []).length + 1}" class="mut">No rows</td></tr>`;
+    html += `<tr><td colspan="${cols.length + (COMPUTED_HEADERS[collection] || []).length + 1}" class="mut">No rows</td></tr>`;
   }
   html += '</tbody></table></div>';
 
@@ -444,6 +482,7 @@ export function settingsView() {
     <p class="hint mut">Commands: <code>/start</code>, <code>/link CODE</code>, <code>/status</code>, <code>/settings</code>, <code>/unlink</code>, <code>/help</code>.</p>
   </div>
   <div class="card"><h2>Mobile notifications</h2><p class="mut">${esc(pushState)}</p>
+    ${nativeShell ? `<p class="hint mut">${esc(CLOSED_APP_PUSH)}</p>` : ''}
     <p class="mut">Bills due, insurance renewals, tasks and birthdays are checked by the server every minute and pushed to every signed-in device the moment they change.</p>
     <button class="btn" data-act="push-on">Enable notifications</button>
     <button class="btn g" data-act="push-test">Send test notification</button>
@@ -602,6 +641,8 @@ export function formHtml(collection, record, isNew) {
   let html = `<div class="modal" data-act="close"><div class="box" data-stop="1"><h2 style="margin:0 0 10px">${isNew ? 'Add' : 'Edit'} - ${esc(def.label)}</h2><form id="frm">`;
   def.fields.forEach((f) => {
     if (f.k === 'id' && def.autoId) return;
+    // The UTC instant is derived from the two fields below, never typed in.
+    if (f.t === 'hidden') return;
     const value = record[f.k] == null ? '' : record[f.k];
     const id = `f_${f.k}`;
     html += `<div class="fld"><label for="${id}">${esc(f.l)}</label>`;
@@ -611,6 +652,9 @@ export function formHtml(collection, record, isNew) {
       html += `<textarea id="${id}" rows="3">${esc(value)}</textarea>`;
     } else if (f.t === 'date') {
       html += `<input id="${id}" type="date" value="${esc(/^\d{4}-\d{2}-\d{2}/.test(value) ? String(value).slice(0, 10) : '')}">`;
+    } else if (f.t === 'time') {
+      // Optional: left empty the task is an all-day deadline.
+      html += `<input id="${id}" type="time" value="${esc(/^([01]\d|2[0-3]):[0-5]\d$/.test(String(value)) ? String(value) : '')}">`;
     } else if (f.t === 'file') {
       html += `<input id="${id}" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" data-file-field="1"${value ? ` data-file-id="${esc(value)}"` : ''}>
         <div class="filemeta mut" id="filelabel">${value ? 'Attached document' : 'No file attached (max 8 MB)'}</div>

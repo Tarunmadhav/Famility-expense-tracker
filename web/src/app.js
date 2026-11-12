@@ -21,6 +21,7 @@ import {
 } from './exporters.js';
 import { detectContactFormat, docsFromGoogleRows } from './contactMap.js';
 import { esc } from './format.js';
+import { deadlineItems, momentFromLocal } from './deadlines.js';
 
 /*
  * The Android shell cannot expose env(safe-area-inset-*) to a WebView, and Google's
@@ -234,6 +235,10 @@ function renderNow() {
   else if (S.tab === 'settings') content = views.settingsView();
   else if (COLLECTIONS[S.tab]) content = views.tableView(S.tab);
   else content = views.tableView('expenses');
+
+  // Deadlines sit above whatever screen is open: overdue first, then the next
+  // 24 hours, then later today. The strip renders itself away when nothing is due.
+  content = views.deadlineBannerHtml(deadlineItems(S.db && S.db.diary, Date.now())) + content;
 
   const active = document.activeElement;
   const focusKey = active && active.getAttribute ? active.getAttribute('data-q') || active.id : '';
@@ -1615,6 +1620,33 @@ document.addEventListener('change', async (event) => {
   }
 });
 
+/* ---------------------------------------------------------- task reminders */
+
+/*
+ * Android notifications for deadlines while the app is open. The Worker sends the
+ * same 15-minute reminder to Telegram; this is the in-app half, posted through the
+ * existing notify() bridge. Each task is announced once per due moment, so a
+ * re-render or a second tick within the same minute cannot repeat it.
+ */
+const remindedKeys = new Set();
+
+function checkDueReminders() {
+  if (S.view !== 'app' || S.locked || !S.db || !S.db.diary) return;
+  const now = Date.now();
+  for (const item of deadlineItems(S.db.diary, now)) {
+    // All-day tasks have no clock time to remind at, and overdue ones are already
+    // in the strip — nobody needs a notification for a deadline that has passed.
+    if (item.allDay || item.overdue) continue;
+    if (item.at - now > 15 * 60 * 1000) continue;
+    const key = `${item.id}:${item.at}`;
+    if (remindedKeys.has(key)) continue;
+    remindedKeys.add(key);
+    showSystemNotification({ title: `Task due at ${item.clock}`, body: item.title, type: 'task_due' });
+  }
+}
+
+if (typeof window !== 'undefined') setInterval(checkDueReminders, 30 * 1000);
+
 /* --------------------------------------------------------------- actions */
 
 /* ------------------------------------------------------- lock and books */
@@ -1919,6 +1951,13 @@ async function saveForm() {
     let value = el.value;
     if (f.t === 'money' || f.t === 'pct') value = value === '' ? 0 : Number(value);
     doc[f.k] = value;
+  }
+  if (formCollection === 'diary') {
+    // Only this device knows what 18:00 means to this person, so the UTC instant
+    // is derived here; the server stores and compares it. No time means all-day,
+    // which stores no instant at all.
+    doc.dueAt = doc.due && doc.dueTime ? momentFromLocal(doc.due, doc.dueTime) : '';
+    if (!doc.due) doc.dueTime = '';
   }
   await guard(async () => {
     if (formRecordId) await api.updateRecord(formCollection, formRecordId, doc);
