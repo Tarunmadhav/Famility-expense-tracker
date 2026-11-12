@@ -449,7 +449,7 @@ export function settingsView() {
     <div class="fld"><label>New PIN (4-12 digits)</label><input id="p_new" type="password" inputmode="numeric" autocomplete="new-password"></div>
     <div class="fld"><label>New PIN again</label><input id="p_new2" type="password" inputmode="numeric" autocomplete="new-password"></div>
     <button class="btn" data-act="change-pin">Change PIN</button>
-    <p class="hint mut">Changing the PIN signs out every other device and leaves this one signed in. Fingerprint unlock stays on.</p>
+    <p class="hint mut">Changing the PIN signs out every other device and leaves this one signed in. On a phone with a fingerprint or face enrolled, the lock screen still accepts it.</p>
     <div class="tw" style="margin-top:12px"><table><thead><tr><th>Device</th><th>Signed in</th><th>Status</th></tr></thead><tbody>${sessionRows}</tbody></table></div>
     <p style="margin-top:10px"><button class="btn r" data-act="revoke-sessions">Sign out all devices</button>
     <button class="btn g" data-act="logout">Sign out here</button></p>
@@ -754,8 +754,13 @@ function biometricButtonHtml() {
   try {
     const bridge = typeof window !== 'undefined' ? window.AndroidBridge : null;
     if (!bridge || typeof bridge.hasBiometric !== 'function') return '';
-    if (!bridge.hasBiometric()) return '';
-    return '<button class="btn g bio" data-act="bio-unlock">Unlock with fingerprint or face</button>';
+    if (!bridge.hasBiometric()) {
+      // Nothing enrolled: say what to do instead of offering a button that would
+      // dead-end, and never claim the phone can unlock by itself.
+      return '<p class="hint mut">Set up fingerprint in phone settings to use it here.</p>';
+    }
+    // The fastest way in on a phone that has a credential enrolled, so it leads.
+    return '<button class="btn bio" data-act="bio-unlock">Use fingerprint</button>';
   } catch {
     return '';
   }

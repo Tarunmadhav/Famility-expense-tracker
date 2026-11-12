@@ -76,3 +76,15 @@ export ANDROID_KEY_PASSWORD='…'
 ```
 
 APK: `android/app/build/outputs/apk/release/app-release.apk`.
+
+## Which certificate the test phone trusts
+
+The app on the Oppo CPH2219 test device is signed with `android/debug.keystore`
+(alias `androiddebugkey`), certificate SHA-256
+`7DA2409250AF541E7810E0F3370EE18E35DDEDAF75DD2DA2F102BB0AD17E6E8D`.
+
+The release certificate previously recorded here, `92fb42cc…`, is **not** the installed
+one; it is stale for this device. `build.sh` takes its keystore and passwords from
+`FFP_KEYSTORE`, `FFP_KEY_ALIAS`, `FFP_STORE_PASS` and `FFP_KEY_PASS`, writes the APK to
+`FFP_OUT_APK`, and only copies to `web/public/download` when `FFP_PUBLISH=1`. A build
+for the test device is not a release build and must never be published.

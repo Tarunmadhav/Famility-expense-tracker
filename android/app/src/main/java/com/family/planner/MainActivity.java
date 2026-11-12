@@ -1,12 +1,15 @@
 package com.family.planner;
 
 import android.app.Activity;
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
@@ -47,6 +50,15 @@ public class MainActivity extends Activity {
     private static final String APP_HOST = Uri.parse(START_URL).getHost() == null
             ? "" : Uri.parse(START_URL).getHost();
     private static final String CHANNEL_ID = "planner_alerts";
+    // Reminders get their own channel because Android freezes a channel's importance
+    // at creation: planner_alerts was created at IMPORTANCE_DEFAULT and can never
+    // show a heads-up banner, however the notification that uses it is posted.
+    private static final String REMINDER_CHANNEL_ID = "planner_reminders_v2";
+    private static final String ALERT_PREFS = "planner_alerts";
+    private static final long POSTED_KEEP_MS = 7L * 24 * 60 * 60 * 1000;
+    private static final long POLL_INTERVAL_MS = 15L * 60 * 1000;
+    private static final String ALERT_ACTION = "com.family.planner.CHECK_ALERTS";
+    private static final int ALERT_REQUEST = 90;
     private static final int NOTIFICATION_PERMISSION = 7;
     // Social sign-in starts in the system browser and comes back as an app link on
     // this path (see the intent filter in AndroidManifest.xml).
@@ -80,6 +92,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         createChannel();
+        createReminderChannel();
         requestNotificationPermission();
 
         web = new WebView(this);
@@ -301,6 +314,22 @@ public class MainActivity extends Activity {
         NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID, "Planner alerts", NotificationManager.IMPORTANCE_DEFAULT);
         channel.setDescription("Bills, insurance renewals, tasks and birthdays");
+        manager.createNotificationChannel(channel);
+    }
+
+    /**
+     * The channel deadlines are posted on. IMPORTANCE_HIGH is what makes a banner
+     * slide down over whatever is on screen; the sound and vibration are the
+     * phone's defaults, the same ones the test alert already used.
+     */
+    private void createReminderChannel() {
+        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        NotificationChannel channel = new NotificationChannel(
+                REMINDER_CHANNEL_ID, "Deadline reminders", NotificationManager.IMPORTANCE_HIGH);
+        channel.setDescription("A task with a time is due now");
+        channel.enableVibration(true);
+        channel.setShowBadge(true);
         manager.createNotificationChannel(channel);
     }
 
@@ -570,6 +599,178 @@ public class MainActivity extends Activity {
         });
     }
 
+    /* ------------------------------------------------------ deadline alerts */
+
+    /** A posted-id key: printable, bounded, and stable for one due moment. */
+    static String alertKey(String raw) {
+        String base = raw == null ? "" : raw.replaceAll("[^A-Za-z0-9:_-]", "").trim();
+        return base.length() > 120 ? base.substring(0, 120) : base;
+    }
+
+    static SharedPreferences alertPrefs(Context context) {
+        return context.getSharedPreferences(ALERT_PREFS, Context.MODE_PRIVATE);
+    }
+
+    /** True when this exact deadline has already been posted on this phone. */
+    static boolean alreadyPosted(Context context, String key) {
+        if (key.isEmpty()) return false;
+        return alertPrefs(context).getLong(key, 0L) > 0L;
+    }
+
+    /**
+     * Remembers a posted id. Everything older than the retention window is dropped
+     * on the same write, so the file stays small without a separate prune pass.
+     */
+    static void markPosted(Context context, String key) {
+        if (key.isEmpty()) return;
+        SharedPreferences prefs = alertPrefs(context);
+        SharedPreferences.Editor edit = prefs.edit().putLong(key, System.currentTimeMillis());
+        long cutoff = System.currentTimeMillis() - POSTED_KEEP_MS;
+        for (java.util.Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+            Object value = entry.getValue();
+            if (value instanceof Long && (Long) value < cutoff) edit.remove(entry.getKey());
+        }
+        edit.apply();
+    }
+
+    /**
+     * One tray entry on the heads-up channel. Keyed by the deadline, so posting the
+     * same one again replaces it instead of stacking a duplicate.
+     */
+    static void postReminder(Context context, String key, String title, String body) {
+        try {
+            Intent open = new Intent(context, MainActivity.class);
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= 23) flags |= PendingIntent.FLAG_IMMUTABLE;
+            PendingIntent pending = PendingIntent.getActivity(context, 0, open, flags);
+            String text = body == null ? "" : body;
+            Notification.Builder builder = new Notification.Builder(context, REMINDER_CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.stat_notify_chat)
+                    .setContentTitle(title == null || title.isEmpty() ? "Deadline reminder" : title)
+                    .setContentText(text)
+                    .setStyle(new Notification.BigTextStyle().bigText(text))
+                    .setPriority(Notification.PRIORITY_HIGH)
+                    .setCategory(Notification.CATEGORY_REMINDER)
+                    .setAutoCancel(true)
+                    .setContentIntent(pending);
+            NotificationManager manager =
+                    (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager != null) manager.notify(key.hashCode(), builder.build());
+        } catch (Exception ignored) {
+            // A failed post must never take the app down with it.
+        }
+    }
+
+    /** The 15-minute check. Runs with the app closed; holds no state of its own. */
+    public static class AlertReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            AlertPoll.poll(context);
+        }
+    }
+
+    /** Re-arms the alarm after a reboot or an app update; repeating alarms do not survive either. */
+    public static class BootReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null) return;
+            String action = intent.getAction();
+            if (Intent.ACTION_BOOT_COMPLETED.equals(action)
+                    || Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) {
+                AlertPoll.schedule(context);
+            }
+        }
+    }
+
+    /**
+     * The closed-app half of reminders: an inexact 15-minute alarm, one request for
+     * the caller's own deadlines, and one tray entry per deadline that has not been
+     * posted yet. The session cookie is read from the WebView's own jar and is never
+     * copied anywhere; the answer is parsed in memory and dropped.
+     */
+    static final class AlertPoll {
+        private AlertPoll() {
+        }
+
+        static PendingIntent intent(Context context) {
+            Intent check = new Intent(context, AlertReceiver.class).setAction(ALERT_ACTION);
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= 23) flags |= PendingIntent.FLAG_IMMUTABLE;
+            return PendingIntent.getBroadcast(context, ALERT_REQUEST, check, flags);
+        }
+
+        static void schedule(Context context) {
+            try {
+                AlarmManager alarms = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                if (alarms == null) return;
+                // Inexact on purpose: no exact-alarm permission is needed, and a
+                // reminder a few minutes late is still a reminder.
+                alarms.setInexactRepeating(AlarmManager.RTC,
+                        System.currentTimeMillis() + POLL_INTERVAL_MS, POLL_INTERVAL_MS, intent(context));
+            } catch (Exception ignored) {
+                // A platform that refuses the alarm leaves the open-app path working.
+            }
+        }
+
+        static void cancel(Context context) {
+            try {
+                AlarmManager alarms = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                if (alarms != null) alarms.cancel(intent(context));
+            } catch (Exception ignored) {
+                // nothing to cancel
+            }
+        }
+
+        static void poll(final Context context) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    java.net.HttpURLConnection conn = null;
+                    try {
+                        String cookie = CookieManager.getInstance().getCookie(START_URL);
+                        // No cookie means signed out: nothing to ask for, and the
+                        // next tick after sign-in picks the work up again.
+                        if (cookie == null || cookie.isEmpty()) return;
+                        java.net.URL url = new java.net.URL(START_URL + "api/alerts/due");
+                        conn = (java.net.HttpURLConnection) url.openConnection();
+                        conn.setConnectTimeout(15000);
+                        conn.setReadTimeout(15000);
+                        conn.setRequestProperty("Cookie", cookie);
+                        conn.setRequestProperty("Accept", "application/json");
+                        if (conn.getResponseCode() != 200) return;
+                        StringBuilder text = new StringBuilder();
+                        try (java.io.InputStream in = conn.getInputStream();
+                             java.io.BufferedReader reader = new java.io.BufferedReader(
+                                     new java.io.InputStreamReader(in, "UTF-8"))) {
+                            String line;
+                            while ((line = reader.readLine()) != null) text.append(line);
+                        }
+                        org.json.JSONArray items = new org.json.JSONObject(text.toString()).optJSONArray("items");
+                        if (items == null) return;
+                        for (int i = 0; i < items.length(); i++) {
+                            org.json.JSONObject item = items.optJSONObject(i);
+                            if (item == null) continue;
+                            String key = alertKey(item.optString("id"));
+                            if (alreadyPosted(context, key)) continue;
+                            postReminder(context, key, item.optString("title"), "");
+                            markPosted(context, key);
+                        }
+                    } catch (Exception ignored) {
+                        // Offline, signed out or a bad answer: the next tick retries.
+                    } finally {
+                        if (conn != null) {
+                            try {
+                                conn.disconnect();
+                            } catch (Exception ignored) {
+                                // already gone
+                            }
+                        }
+                    }
+                }
+            }).start();
+        }
+    }
+
     /** Exposed to JavaScript as window.AndroidBridge. */
     class AndroidBridge {
         AndroidBridge() {
@@ -585,6 +786,39 @@ public class MainActivity extends Activity {
             String safeBody = body == null ? "" : body.replaceAll("[\\p{Cntrl}]", " ").trim();
             if (safeBody.length() > 300) safeBody = safeBody.substring(0, 300);
             postNotification(safeTitle, safeBody);
+        }
+
+        /**
+         * A deadline reminder: heads-up channel, posted once per id. The id comes
+         * from the page (task plus due moment), so a re-render cannot repeat it.
+         */
+        @JavascriptInterface
+        public void notifyReminder(String id, String title, String body) {
+            if (!onTrustedPage()) return;
+            String key = alertKey(id);
+            if (alreadyPosted(MainActivity.this, key)) return;
+            String safeTitle = title == null ? "" : title.replaceAll("[\\p{Cntrl}]", " ").trim();
+            if (safeTitle.length() > 80) safeTitle = safeTitle.substring(0, 80);
+            String safeBody = body == null ? "" : body.replaceAll("[\\p{Cntrl}]", " ").trim();
+            if (safeBody.length() > 300) safeBody = safeBody.substring(0, 300);
+            postReminder(MainActivity.this, key, safeTitle, safeBody);
+            markPosted(MainActivity.this, key);
+        }
+
+        /** Arms the closed-app check. Called once the planner is open and unlocked. */
+        @JavascriptInterface
+        public boolean startAlerts() {
+            if (!onTrustedPage()) return false;
+            AlertPoll.schedule(MainActivity.this);
+            return true;
+        }
+
+        /** Disarms it on sign-out, so a signed-out phone asks for nothing. */
+        @JavascriptInterface
+        public boolean stopAlerts() {
+            if (!onTrustedPage()) return false;
+            AlertPoll.cancel(MainActivity.this);
+            return true;
         }
 
         @JavascriptInterface

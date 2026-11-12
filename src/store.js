@@ -1420,6 +1420,30 @@ export const REMINDER_WINDOW_MS = 15 * 60 * 1000;
  * one broken chat stop the others. Tasks with no time are all-day and are left to
  * the day-level sweep.
  */
+/**
+ * The deadline list the phone's alarm receiver asks for: one entry per task that
+ * carries a clock time, from the books the caller may read. Titles stay generic
+ * and no amount is ever included, because a notification tray can be read without
+ * unlocking the phone. `id` is stable for a task and its due moment, so the shell
+ * can post each one once and never twice.
+ */
+export async function dueAlerts(env, spaces, { now = Date.now(), windowMs = REMINDER_WINDOW_MS } = {}) {
+  const items = [];
+  for (const space of spaces || []) {
+    for (const task of await listCollection(env, space, 'diary')) {
+      if (!task || task.status === 'Completed') continue;
+      const at = Date.parse(String(task.dueAt || ''));
+      if (!Number.isFinite(at)) continue;
+      // The receiver ticks every 15 minutes, so the look-back is one window: a task
+      // that fell between two ticks is still announced, and nothing older is.
+      if (at > now + windowMs) continue;
+      if (at < now - windowMs) continue;
+      items.push({ id: `task:${space}:${task.id}:${at}`, title: `Task due at ${istClock(at)}`, dueAt: at });
+    }
+  }
+  return items.sort((a, b) => a.dueAt - b.dueAt);
+}
+
 export async function remindDueTasks(env, { now = Date.now(), windowMs = REMINDER_WINDOW_MS } = {}) {
   const rows = await env.DB.prepare(`SELECT DISTINCT space FROM records WHERE collection = 'diary'`).all();
   const created = [];

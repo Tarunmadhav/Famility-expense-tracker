@@ -84,21 +84,32 @@ while IFS= read -r file; do CLASS_FILES+=("$file"); done < <(find "$OUT/classes"
 
 "$ZIPALIGN" -f 4 "$OUT/app-unsigned.apk" "$OUT/app-aligned.apk"
 
-KEYSTORE="$ROOT/android/debug.keystore"
+# Signing. The defaults keep a fresh clone building with the local keystore; a
+# build meant for a device names its keystore and passwords in the environment
+# (FFP_KEYSTORE, FFP_KEY_ALIAS, FFP_STORE_PASS, FFP_KEY_PASS), which is also why
+# no password is written into this file. FFP_OUT_APK picks where it lands.
+KEYSTORE="${FFP_KEYSTORE:-$ROOT/android/debug.keystore}"
+KEY_ALIAS="${FFP_KEY_ALIAS:-androiddebugkey}"
+STORE_PASS="${FFP_STORE_PASS:-android}"
+KEY_PASS="${FFP_KEY_PASS:-$STORE_PASS}"
+OUTPUT_APK="${FFP_OUT_APK:-$ROOT/android/FamilyPlanner.apk}"
 if [ ! -f "$KEYSTORE" ]; then
-  keytool -genkeypair -v -keystore "$KEYSTORE" -alias androiddebugkey \
-    -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+  keytool -genkeypair -v -keystore "$KEYSTORE" -alias "$KEY_ALIAS" \
+    -storepass "$STORE_PASS" -keypass "$KEY_PASS" -keyalg RSA -keysize 2048 -validity 10000 \
     -dname "CN=Family Planner, OU=Household, O=Family, L=Vijayawada, C=IN" > /dev/null 2>&1
 fi
 
-"$APKSIGNER" sign --ks "$KEYSTORE" --ks-key-alias androiddebugkey \
-  --ks-pass pass:android --key-pass pass:android \
-  --out "$ROOT/android/FamilyPlanner.apk" "$OUT/app-aligned.apk"
+"$APKSIGNER" sign --ks "$KEYSTORE" --ks-key-alias "$KEY_ALIAS" \
+  --ks-pass "pass:$STORE_PASS" --key-pass "pass:$KEY_PASS" \
+  --out "$OUTPUT_APK" "$OUT/app-aligned.apk"
 
-"$APKSIGNER" verify --print-certs "$ROOT/android/FamilyPlanner.apk" | head -4
+"$APKSIGNER" verify --print-certs "$OUTPUT_APK" | head -4
 
-# Publish the build next to the web app so /api/version can point at a real file.
-mkdir -p "$ROOT/web/public/download"
-cp "$ROOT/android/FamilyPlanner.apk" "$ROOT/web/public/download/family-planner-$VERSION_NAME.apk"
-echo "APK: $ROOT/android/FamilyPlanner.apk ($(du -h "$ROOT/android/FamilyPlanner.apk" | cut -f1)) v$VERSION_NAME ($VERSION_CODE)"
-echo "Served at: /download/family-planner-$VERSION_NAME.apk";
+# Publishing is opt-in (FFP_PUBLISH=1). A test build must never land on the
+# download page that /api/version advertises.
+if [ "${FFP_PUBLISH:-0}" = "1" ]; then
+  mkdir -p "$ROOT/web/public/download"
+  cp "$OUTPUT_APK" "$ROOT/web/public/download/family-planner-$VERSION_NAME.apk"
+  echo "Served at: /download/family-planner-$VERSION_NAME.apk"
+fi
+echo "APK: $OUTPUT_APK ($(du -h "$OUTPUT_APK" | cut -f1)) v$VERSION_NAME ($VERSION_CODE)";

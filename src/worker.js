@@ -40,6 +40,7 @@ import {
   deleteRecord,
   deleteSession,
   deleteUserSessions,
+  dueAlerts,
   ensureSchema,
   getMeta,
   getSession,
@@ -1131,6 +1132,22 @@ async function handleApi(request, env, ctx, url) {
 
   if (path === '/api/audit' && method === 'GET') {
     return json({ events: await listAudit(env, space, url.searchParams.get('limit') || 60) });
+  }
+
+  if (path === '/api/alerts/due' && method === 'GET') {
+    // What the phone's alarm receiver asks for when the app is not in front. It
+    // answers for the caller's own books only, and carries no amount and no task
+    // note: a notification tray can be read without unlocking the phone. The
+    // receiver ticks every 15 minutes, so the hourly cap is generous but finite.
+    if (await hitRateLimit(env, `alerts:${session.userId}`, 120, 3600_000)) {
+      throw new HttpError(429, 'Too many alert checks');
+    }
+    const readable = (await listProfiles(env, session.userId)).filter((p) => p.role !== undefined);
+    const items = await dueAlerts(
+      env,
+      readable.map((p) => p.id),
+    );
+    return json({ items, now: Date.now() }, 200, { 'Cache-Control': 'no-store' });
   }
 
   if (path === '/api/notifications/all' && method === 'GET') {

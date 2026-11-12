@@ -190,10 +190,12 @@ function renderNow() {
   if (boot) boot.remove();
   if (S.locked) {
     app().innerHTML = views.lockHtml(S.lockError || '');
+    autoPromptBiometric();
     const input = document.getElementById('lockpin');
     if (input) input.focus();
     return;
   }
+  biometricPrompted = false;
   if (S.view === 'setup') {
     app().innerHTML = views.authShell(views.setupFormHtml(S.error));
     const input = document.getElementById('household');
@@ -503,7 +505,17 @@ async function showSystemNotification(note) {
   toast(`${note.title}`);
   if (window.AndroidBridge && typeof window.AndroidBridge.notify === 'function') {
     try {
-      window.AndroidBridge.notify(String(note.title), String(note.body || ''));
+      if (note.type === 'task_due' && typeof window.AndroidBridge.notifyReminder === 'function') {
+        // Reminders belong on the heads-up channel, and the shell keeps the id so
+        // the same deadline is never announced twice.
+        window.AndroidBridge.notifyReminder(
+          String(note.id || note.title),
+          String(note.title),
+          String(note.body || ''),
+        );
+      } else {
+        window.AndroidBridge.notify(String(note.title), String(note.body || ''));
+      }
       return;
     } catch {
       /* fall through to web notification */
@@ -1378,6 +1390,16 @@ document.addEventListener('click', async (event) => {
       return undefined;
     case 'logout':
       await api.logout().catch(() => {});
+      // A signed-out phone has no session to ask with, so the shell's 15-minute
+      // check is switched off here rather than left ticking.
+      try {
+        if (window.AndroidBridge && typeof window.AndroidBridge.stopAlerts === 'function') {
+          window.AndroidBridge.stopAlerts();
+        }
+      } catch {
+        /* browser, or no shell */
+      }
+      alertsArmed = false;
       if (events) events.close();
       if (pollTimer) clearInterval(pollTimer);
       setView('login');
@@ -1630,8 +1652,26 @@ document.addEventListener('change', async (event) => {
  */
 const remindedKeys = new Set();
 
+/*
+ * The shell's own 15-minute check only needs to be armed once per launch, and only
+ * while a session exists: this runs after the planner has painted, so a signed-out
+ * phone never asks the server for anything.
+ */
+let alertsArmed = false;
+
+function armAlerts() {
+  const bridge = typeof window !== 'undefined' ? window.AndroidBridge : null;
+  if (!bridge || typeof bridge.startAlerts !== 'function' || alertsArmed) return;
+  try {
+    if (bridge.startAlerts()) alertsArmed = true;
+  } catch {
+    // A browser, or a shell build without the alarm path: nothing to arm.
+  }
+}
+
 function checkDueReminders() {
   if (S.view !== 'app' || S.locked || !S.db || !S.db.diary) return;
+  armAlerts();
   const now = Date.now();
   for (const item of deadlineItems(S.db.diary, now)) {
     // All-day tasks have no clock time to remind at, and overdue ones are already
@@ -1641,7 +1681,7 @@ function checkDueReminders() {
     const key = `${item.id}:${item.at}`;
     if (remindedKeys.has(key)) continue;
     remindedKeys.add(key);
-    showSystemNotification({ title: `Task due at ${item.clock}`, body: item.title, type: 'task_due' });
+    showSystemNotification({ id: key, title: `Task due at ${item.clock}`, body: item.title, type: 'task_due' });
   }
 }
 
@@ -1650,6 +1690,32 @@ if (typeof window !== 'undefined') setInterval(checkDueReminders, 30 * 1000);
 /* --------------------------------------------------------------- actions */
 
 /* ------------------------------------------------------- lock and books */
+
+/*
+ * One automatic system prompt per lock, and only when the shell says a usable
+ * credential is enrolled. It presses the same button rather than calling the
+ * bridge directly, so a pass still has to be confirmed against the live session.
+ */
+let biometricPrompted = false;
+
+function autoPromptBiometric() {
+  if (biometricPrompted) return;
+  const bridge = typeof window !== 'undefined' ? window.AndroidBridge : null;
+  if (!bridge || typeof bridge.hasBiometric !== 'function' || typeof bridge.promptBiometric !== 'function') return;
+  let ready = false;
+  try {
+    ready = Boolean(bridge.hasBiometric());
+  } catch {
+    ready = false;
+  }
+  if (!ready) return;
+  biometricPrompted = true;
+  setTimeout(() => {
+    if (!S.locked) return;
+    const button = document.querySelector('[data-act="bio-unlock"]');
+    if (button) button.click();
+  }, 350);
+}
 
 let lockTimer = null;
 

@@ -9,6 +9,9 @@
          credential is enrolled. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.USE_FINGERPRINT" />
+    <!-- Re-arms the 15-minute deadline check after a reboot: a setInexactRepeating
+         alarm does not survive one, and reminders must still arrive the next day. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!--
       allowBackup is off on purpose: the WebView keeps the session cookie and the
@@ -58,5 +61,19 @@
                     android:pathPrefix="/api/auth/oauth/finish" />
             </intent-filter>
         </activity>
+
+        <!-- Deadline check while the app is closed. Both are internal: exported is
+             true only for the boot one, which the system has to be able to deliver. -->
+        <receiver
+            android:name=".MainActivity$AlertReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".MainActivity$BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
