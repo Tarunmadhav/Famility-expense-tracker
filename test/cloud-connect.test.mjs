@@ -16,8 +16,12 @@ const ORIGIN = 'http://localhost:8787';
 // 32 bytes, base64url — the shape BACKUP_KEY must have.
 const BACKUP_KEY = '3xkHIItGG0-ExLXWjow78iOAAHZOZimTarK7FuYMpy0';
 
-async function call(env, path, { method = 'GET', body, cookie, redirect = 'manual' } = {}) {
-  const headers = { Origin: ORIGIN };
+// `origin: null` drops the Origin header and `site` sets Sec-Fetch-Site, which is
+// how a top-level redirect back from the provider looks: no Origin, cross-site.
+async function call(env, path, { method = 'GET', body, cookie, redirect = 'manual', origin = ORIGIN, site } = {}) {
+  const headers = {};
+  if (origin) headers.Origin = origin;
+  if (site) headers['Sec-Fetch-Site'] = site;
   if (body) headers['Content-Type'] = 'application/json';
   if (cookie) headers.Cookie = cookie;
   const res = await worker.fetch(
@@ -141,6 +145,101 @@ test('a code exchange stores a sealed refresh token and the provider never sees 
     { cookie },
   );
   assert.equal(new URL(replay.location).searchParams.get('cloud'), 'failed');
+});
+
+test('a cross-site GET navigation back from Google connects the drive', async () => {
+  const { db, env, cookie, userId } = await setup();
+  const linked = await startConnect(env, 'google', userId, `${ORIGIN}/api/cloud/callback/google`);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-secret', expires_in: 3600 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  try {
+    // Exactly what Chrome sends after a redirect from accounts.google.com.
+    const res = await call(
+      env,
+      `/api/cloud/callback/google?code=code-1&state=${encodeURIComponent(linked.state)}`,
+      { cookie, origin: null, site: 'cross-site' },
+    );
+    assert.equal(res.status, 302, 'the provider return was refused');
+    assert.equal(new URL(res.location).searchParams.get('cloud'), 'connected');
+    assert.ok(db.prepare(`SELECT 1 AS ok FROM cloud_links WHERE provider = 'google'`).get());
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('an unknown or reused state redirects with a reason and writes nothing', async () => {
+  const { db, env, cookie, userId } = await setup();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-secret', expires_in: 3600 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  try {
+    const bogus = await call(env, '/api/cloud/callback/google?code=c&state=not-a-real-state', {
+      cookie,
+      origin: null,
+      site: 'cross-site',
+    });
+    assert.equal(bogus.status, 302, 'the failure was a raw JSON error, not a redirect');
+    assert.equal(new URL(bogus.location).searchParams.get('cloud'), 'failed');
+    assert.ok(!db.prepare(`SELECT 1 AS ok FROM cloud_links`).get(), 'an invalid state wrote a connection');
+
+    const linked = await startConnect(env, 'google', userId, `${ORIGIN}/api/cloud/callback/google`);
+    const first = await call(env, `/api/cloud/callback/google?code=code-1&state=${encodeURIComponent(linked.state)}`, {
+      cookie,
+      origin: null,
+      site: 'cross-site',
+    });
+    assert.equal(new URL(first.location).searchParams.get('cloud'), 'connected');
+
+    const replay = await call(env, `/api/cloud/callback/google?code=code-1&state=${encodeURIComponent(linked.state)}`, {
+      cookie,
+      origin: null,
+      site: 'cross-site',
+    });
+    assert.equal(replay.status, 302);
+    assert.equal(new URL(replay.location).searchParams.get('cloud'), 'failed');
+    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM cloud_links`).get().n, 1, 'the replay wrote a second row');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('a cross-site POST is still refused, and a same-origin POST still works', async () => {
+  const { env, cookie } = await setup();
+  const evil = await call(env, '/api/cloud/settings', {
+    method: 'POST',
+    cookie,
+    origin: 'https://evil.example',
+    body: { frequency: 'weekly', keep: 3 },
+  });
+  assert.equal(evil.status, 403);
+  assert.match(evil.data.error, /Cross-origin/);
+
+  // A POST with no Origin but a cross-site fetch metadata is the same refusal.
+  const noOrigin = await call(env, '/api/cloud/settings', {
+    method: 'POST',
+    cookie,
+    origin: null,
+    site: 'cross-site',
+    body: { frequency: 'weekly', keep: 3 },
+  });
+  assert.equal(noOrigin.status, 403);
+
+  const own = await call(env, '/api/cloud/settings', {
+    method: 'POST',
+    cookie,
+    origin: ORIGIN,
+    site: 'same-origin',
+    body: { frequency: 'weekly', keep: 3 },
+  });
+  assert.equal(own.status, 200);
+  assert.equal(own.data.settings.frequency, 'weekly');
 });
 
 test('another account cannot complete a connection with a stolen state', async () => {
