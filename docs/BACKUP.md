@@ -11,7 +11,7 @@ feature.
 {
   "format": "ffp-backup",
   "schemaVersion": 2,
-  "appVersion": "2.5.0",
+  "appVersion": "2.6.0",
   "createdAt": "2026-11-09T10:00:00.000Z",
   "moneyUnit": "paise",
   "account": { "id": "…", "email": "…" },

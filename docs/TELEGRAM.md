@@ -54,6 +54,12 @@ Code: `src/telegram.js` (linking, delivery, commands) and the
 
    The reply is `{"ok":true,"result":true,"description":"Webhook was set"}`.
 
+   This is the step people miss, and a bot with no webhook never answers `/link`
+   however healthy the token looks. There is a button for it: sign in, open
+   **Settings → Notifications**, and press **Connect the bot to this site**. It
+   runs the same `setWebhook` from the Worker with the secret already stored
+   there, so no value is ever typed or copied.
+
 6. Check it took:
 
    ```cmd
@@ -140,6 +146,13 @@ in `runBackground` (after any write and on `/api/state`) and in the daily cron:
 | `/status` | account name, how many books, unread alerts, preview setting |
 | `/settings [generic\|detailed]` | show or change the preview |
 | `/unlink` | revoke the link; queued alerts for that chat are dropped |
+| `/verify` | email a six-character code to confirm this chat; `/request` and `/upload` need it |
+| `/request` | a link to export your data (verified chats only) |
+| `/upload` | a link to import contacts (verified chats only) |
+| `/logout` | unlink and drop this chat's verification; the app stays signed in |
+
+`/start` and `/help` print this list, so a command the bot handles is never
+undocumented.
 
 Commands are limited to 30 per minute per Telegram user, and updates are
 deduplicated by `update_id`, so Telegram's retries are harmless.

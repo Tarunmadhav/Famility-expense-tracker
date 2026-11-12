@@ -122,7 +122,7 @@ import {
 } from './profiles.js';
 
 /** Build/api version reported to clients; bump when the API contract changes. */
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.6.0';
 const API_VERSION = 14;
 
 /** Content sniffing: the browser-declared type is never trusted. */

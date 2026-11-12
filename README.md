@@ -14,9 +14,9 @@ a real database, live multi-device sync, PIN-protected sessions and push notific
 * **Website / Android app:** https://family-finance-planner.tarungudipatimadhav.workers.dev
 * **Hosting:** your own Cloudflare account (Workers free plan) — Worker `family-finance-planner`,
   D1 `family-planner` (APAC, region `SIN`), R2 bucket `family-planner-drive` bound as `FILES`.
-  API version **9**, app version **2.1.0** (`GET /api/version`).
-* **Family PIN:** none yet. This deployment starts from an empty database, so the first visit asks
-  you to create the household and choose the PIN.
+  API version **14**, app version **2.6.0** (`GET /api/version`).
+* **Accounts:** this deployment is live with real accounts and books. Sign-up is open, so a new
+  visitor creates a private planner of their own, or joins an existing household with an invite code.
 * The previous deployment at `site-0f6d51dc…freebuff.page` is untouched and still holds the old data.
 
 ## What is in the box
@@ -403,8 +403,13 @@ curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
   -d "secret_token=$TELEGRAM_WEBHOOK_SECRET"
 ```
 
+The same `setWebhook` call is also a button: **Settings → Notifications → Connect the bot to this
+site** registers it from inside the Worker, so the token never has to be typed anywhere, and the card
+reports whether Telegram is posting here, somewhere else, or not at all.
+
 Full setup, command list and the security model: [docs/TELEGRAM.md](docs/TELEGRAM.md). In short:
-`/start`, `/link CODE`, `/status`, `/settings`, `/unlink`, `/help`; a link code is single use, expires in
+`/start`, `/link CODE`, `/status`, `/settings`, `/unlink`, `/help` (plus `/verify`, `/request`,
+`/upload` and `/logout` once a chat is linked); a link code is single use, expires in
 ten minutes and is stored only as a hash; one Telegram identity per planner account and one account per
 identity; the webhook rejects any request whose `X-Telegram-Bot-Api-Secret-Token` does not match; the
 default alert is a generic "You have a new planner alert" and amounts are opt-in per chat.
@@ -476,7 +481,7 @@ Two ways to run it on a phone, both from the same codebase:
 (Chrome delivers them through FCM even when the app is closed).
 
 **2. Install the native APK** — the signed build is published at
-`/download/family-planner-2.1.0.apk` (also linked from Settings → Mobile notifications) and can be
+`/download/family-planner-2.5.0.apk` (also linked from Settings → Mobile notifications) and can be
 rebuilt locally:
 
 ```bash

@@ -4,6 +4,50 @@ All notable changes to Family Finance Planner. Versions follow the Android
 `versionName`; the API version is separate and only moves when a route changes
 shape.
 
+## [2.6.0] - 2026-11-12
+
+Web and Worker release. The Android `versionName` is 2.6.0 (`versionCode` 10) for
+the next build; the APK at `/download/` is still 2.5.0 until that build is made,
+and the `release` row `/api/version` serves is unchanged.
+
+### Added
+
+- **Biometric unlock on Android.** The lock screen asks the system fingerprint or
+  face unlock through `BiometricPrompt` (API 28+) or `FingerprintManager`
+  (26–27). One prompt at a time, cancelled when the screen changes, a 90 s
+  watchdog, and a live session re-check before the planner paints; a cancelled or
+  failed prompt falls back to the PIN.
+- **One-click webhook registration.** Settings → Notifications → Telegram can
+  point the bot at this deployment (`POST /api/telegram/webhook/register`) without
+  handling the token, and says whether Telegram is posting here, somewhere else,
+  or not at all.
+- **Import up to 5000 rows** per file, up from 500 (the 2 MB cap still applies).
+
+### Fixed
+
+- **Google Drive could not be connected.** The provider redirects back with a
+  top-level navigation, which sends no `Origin` and `Sec-Fetch-Site: cross-site`,
+  so the CSRF check answered `403 Cross-origin request blocked` before the
+  callback ran. GET on the OAuth callback paths is now exempt from the origin
+  check; every other method and path keeps it, and tests cover both sides.
+- **Changing the PIN did not take effect.** The handler rewrote the first account
+  in the table instead of the signed-in one, and demanded a permission an account
+  with its own PIN does not need. It now updates the caller's row, and explains
+  the password-only case instead of failing silently.
+- **A valid Telegram link code could be burned by its own "already linked"
+  refusal.** The uniqueness check now runs before the code is claimed.
+- **`/help` did not list `/start`** — the one command a new user is told to send.
+- **A failed Drive consent was unreadable.** The callback now carries the
+  provider's reason, so "cancelled" and "not a test user" read differently.
+- Saving a Telegram preference dropped the loaded webhook state, which hid the
+  "bot is not connected" warning until Settings was reopened.
+
+### Changed
+
+- The UI paints once per animation frame instead of once per state change.
+- Settings folds the long AI, Documents and recent-changes sections behind
+  `<details>`, and the lock timeout moved into its own sub-section.
+
 ## [2.5.0] - 2026-11-11
 
 First release signed with the app's own release key (versionCode 9). APK:
