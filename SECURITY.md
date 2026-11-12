@@ -170,3 +170,23 @@ sign-in is ever added. This is a public fact about the certificate, not a secret
    secret, accepting that existing installs must be reinstalled once.
 5. Product decisions: multiple owners per household, whether linked logins share
    one book, and backup frequency/retention.
+
+## Test-device signing key (open item, owner decides)
+
+`android/debug.keystore` is committed to this repository and its certificate
+(`CN=Family Planner`, SHA-256 `7DA2409250AF541E7810E0F3370EE18E35DDEDAF75DD2DA2F102BB0AD17E6E8D`)
+is the certificate of the app installed on the test phone. Anyone with the repository
+can therefore sign an APK that the test phone will accept as an update.
+
+- **Today:** the keystore is used only for the Oppo test build (`dist/test/…`), never
+  published, never used for `/api/version`, never tagged.
+- **Recommendation:** untrack `android/debug.keystore` (`git rm --cached`), rotate the
+  key for any future device build, and keep a device key outside the repository. Files
+  are not deleted here; that decision is the owner's.
+
+## GET /api/alerts/due
+
+Added for the phone's closed-app reminder check. Requires a session (401 without one),
+answers only for books the caller may read, is rate-limited to 120 calls an hour per
+account, and returns a stable id, a generic title (`Task due at HH:MM`) and a due
+moment — never an amount, a task note, a secret or a feed token.
