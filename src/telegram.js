@@ -534,6 +534,9 @@ export async function endChatSession(env, link) {
 const HELP = [
   'Family Finance Planner',
   '',
+  // /start belongs here: the app tells people to send it, and a command the bot
+  // handles but never documents reads like a broken bot.
+  '/start — open the bot and see whether this chat is connected',
   '/link CODE — connect this chat to your planner account',
   '/verify — email a code to confirm this chat',
   '/status — what this chat is connected to',
