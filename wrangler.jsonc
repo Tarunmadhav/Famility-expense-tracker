@@ -46,6 +46,8 @@
   // whether an account is backed up is a per-account switch that defaults to off,
   // so this costs one scheduled invocation a day that usually does nothing.
   "triggers": {
-    "crons": ["17 2 * * *"]
+    // Every quarter hour for task reminders (a task is reminded in the 15
+    // minutes before it is due), plus the daily backup slot.
+    "crons": ["*/15 * * * *", "17 2 * * *"]
   }
 }

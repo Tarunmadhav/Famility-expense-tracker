@@ -512,4 +512,18 @@ export const MIGRATIONS = [
          ON telegram_verify_codes (telegram_user_id, created_at DESC)`,
     ],
   },
+  {
+    id: '0010_task_due_at',
+    name: 'index the UTC due moment of tasks',
+    // Tasks are documents in `records`, so there is no column to add — the due
+    // moment lives in the JSON. An expression index is the only D1-level
+    // structure available for it, and it keeps the reminder scan cheap as the
+    // diary grows. Existing rows are untouched: NULL dueAt rows simply are not
+    // in the index, and every task written before this release still reads.
+    statements: [
+      `CREATE INDEX IF NOT EXISTS records_diary_due_at_idx
+         ON records (json_extract(doc, '$.dueAt'))
+         WHERE collection = 'diary'`,
+    ],
+  },
 ];

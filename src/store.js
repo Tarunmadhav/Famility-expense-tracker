@@ -1396,6 +1396,56 @@ export async function addNotification(env, n) {
   };
 }
 
+/**
+ * A task's clock time in the deployment's zone (IST, like the rest of the app's
+ * "today" maths). The device stored a UTC instant; this is only for the text.
+ */
+function istClock(ms) {
+  const d = new Date(ms + 5.5 * 3600 * 1000);
+  const hours = d.getUTCHours();
+  const minutes = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${hours % 12 || 12}:${minutes} ${hours >= 12 ? 'PM' : 'AM'}`;
+}
+
+/** How far ahead a task counts as "due now". */
+export const REMINDER_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * Task reminders for the next 15 minutes, one notification per book.
+ *
+ * The notification's unique `dedupe` is what makes a second run — or a cron that
+ * fires again after a retry — a no-op, so a reminder is sent exactly once.
+ * queueNotification hands the row to the Telegram drain, which already knows how
+ * to handle 403 (blocked), 400 (bad chat) and 429 (rate limit) without letting
+ * one broken chat stop the others. Tasks with no time are all-day and are left to
+ * the day-level sweep.
+ */
+export async function remindDueTasks(env, { now = Date.now(), windowMs = REMINDER_WINDOW_MS } = {}) {
+  const rows = await env.DB.prepare(`SELECT DISTINCT space FROM records WHERE collection = 'diary'`).all();
+  const created = [];
+  for (const row of rows.results || []) {
+    const space = row.space;
+    for (const task of await listCollection(env, space, 'diary')) {
+      if (!task || task.status === 'Completed') continue;
+      const at = Date.parse(String(task.dueAt || ''));
+      if (!Number.isFinite(at)) continue;
+      if (at <= now || at > now + windowMs) continue;
+      const note = await addNotification(env, {
+        space,
+        type: 'task_due',
+        title: `Task due at ${istClock(at)}: ${task.title || 'Task'}`,
+        body: String(task.follow || ''),
+        level: task.priority === 'High' ? 'high' : 'info',
+        collection: 'diary',
+        recordId: task.id,
+        dedupe: `taskrem:${task.id}:${at}`,
+      });
+      if (note) created.push(note);
+    }
+  }
+  return created;
+}
+
 /** Domain events: bill due, renewal, task, birthday, budget drift. */
 export async function sweep(env, { force = false } = {}) {
   const last = await getMeta(env, 'sweep', 0);

@@ -75,6 +75,7 @@ import {
   totpState,
   verifyTotp,
 } from './store.js';
+import { remindDueTasks } from './store.js';
 import { removeSubscription, saveSubscription, sendTestPush } from './push.js';
 import { scanReceipt, testConnection } from './ai.js';
 import { encryptionReady } from './fieldcrypto.js';
@@ -176,6 +177,11 @@ export default {
     // here, without a request having to happen first.
     ctx.waitUntil(
       deliverPending(env, { now }).catch((err) => console.error('telegram drain failed', err && err.message)),
+    );
+    // Task reminders run on the quarter hour (see the cron in wrangler.jsonc),
+    // which is exactly the 15-minute window a task is reminded in.
+    ctx.waitUntil(
+      remindDueTasks(env, { now }).catch((err) => console.error('task reminders failed', err && err.message)),
     );
   },
 
@@ -470,6 +476,22 @@ function permissionFor(method, path) {
 
 /** The office book only holds work modules; anything else is rejected at the API. */
 const OFFICE_COLLECTIONS = new Set(['diary', 'contacts', 'expenses']);
+
+/**
+ * A task's due moment must be a real ISO 8601 instant: the reminder job compares
+ * it with a clock, so a bare date or a typo has to be refused here rather than
+ * stored and silently never firing. All-day tasks send no dueAt at all.
+ */
+function assertDueMoment(collection, doc) {
+  if (collection !== 'diary' || !doc || typeof doc !== 'object') return;
+  if (doc.dueAt === undefined || doc.dueAt === null) return;
+  const value = String(doc.dueAt).trim();
+  if (!value) return;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})$/.test(value)) {
+    throw new HttpError(400, 'The due moment must be an ISO 8601 instant with a time and a zone');
+  }
+  if (!Number.isFinite(Date.parse(value))) throw new HttpError(400, 'Enter a valid due date and time');
+}
 
 function assertSpaceCollection(space, collection) {
   if (String(space).startsWith('o:') && !OFFICE_COLLECTIONS.has(String(collection))) {
@@ -1521,6 +1543,7 @@ async function handleApi(request, env, ctx, url) {
   if (path === '/api/records' && method === 'POST') {
     const body = await readJson(request);
     assertSpaceCollection(space, body.collection);
+    assertDueMoment(String(body.collection || ''), body.doc);
     const out = await createRecord(env, space, String(body.collection || ''), body.doc || {}, session.userId);
     ctx.waitUntil(runBackground(env));
     return json(out);
@@ -1564,6 +1587,7 @@ async function handleApi(request, env, ctx, url) {
     assertSpaceCollection(space, collection);
     if (method === 'PATCH') {
       const body = await readJson(request);
+      assertDueMoment(collection, body.doc);
       const out = await updateRecord(env, space, collection, id, body.doc || {}, session.userId);
       ctx.waitUntil(runBackground(env));
       return json(out);
