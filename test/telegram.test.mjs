@@ -466,6 +466,44 @@ test('every command in the list is answered, before and after /unlink', async ()
   }
 });
 
+test('every command /help advertises is handled, including the six core ones', async () => {
+  const { env } = await setup();
+  const owner = await signup(env, 'helplist@example.com');
+  await consumeLinkCode(
+    env,
+    (await call(env, '/api/telegram/link', { method: 'POST', cookie: owner.cookie })).data.code,
+    { telegramUserId: '700000090', chatId: '700000090' },
+  );
+
+  const stub = stubBoth();
+  try {
+    const send = sender(env, 700000090);
+    const replyTo = async (text) => {
+      stub.replies.length = 0;
+      await send(text);
+      return stub.replies[0] || '';
+    };
+
+    const help = await replyTo('/help');
+    // These six are what the app's Settings card and BotFather advertise.
+    for (const core of ['/start', '/link', '/status', '/settings', '/unlink', '/help']) {
+      assert.ok(help.includes(core), `/help does not list ${core}`);
+    }
+
+    // Whatever /help prints must actually answer: a command that is advertised
+    // and then treated as unknown is worse than not advertising it at all.
+    const listed = [...new Set(help.match(/\/[a-z]+/g) || [])];
+    assert.ok(listed.length >= 6, 'help listed nothing');
+    for (const command of listed) {
+      const reply = await replyTo(command);
+      assert.ok(reply.length > 0, `${command} produced no reply at all`);
+      assert.doesNotMatch(reply, /Unknown command/, `${command} is advertised in /help but not handled`);
+    }
+  } finally {
+    stub.restore();
+  }
+});
+
 test('/verify emails a code, verifies the chat once, and unlocks /request', async () => {
   const { env } = await setup({ RESEND_API_KEY: 'test-resend-key-not-real' });
   const owner = await signup(env, 'verify@example.com');
