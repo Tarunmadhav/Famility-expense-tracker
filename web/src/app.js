@@ -1993,7 +1993,10 @@ async function saveQuickEntry() {
 async function changePin() {
   const current = document.getElementById('p_cur').value.trim();
   const next = document.getElementById('p_new').value.trim();
+  const again = ((document.getElementById('p_new2') || {}).value || '').trim();
   if (!/^\d{4,12}$/.test(next)) return toast('New PIN must be 4-12 digits');
+  // Typing it twice is the only guard against locking yourself out with a typo.
+  if (next !== again) return toast('The two new PINs do not match');
   await guard(async () => {
     await api.changePin(current, next);
     toast('PIN changed. Other devices were signed out.');

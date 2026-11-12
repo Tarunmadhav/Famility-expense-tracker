@@ -341,8 +341,25 @@ export function settingsView() {
   // The Android shell has no Notification API but does post to the tray through its
   // bridge, so the app must not tell a phone user that alerts are impossible.
   const nativeShell = typeof window !== 'undefined' && Boolean(window.AndroidBridge && window.AndroidBridge.notify);
+  // The Android shell can report whether the tray will actually show an alert;
+  // a browser cannot, so there the Notification API answers instead.
+  let nativeNotificationState = 'unknown';
+  if (nativeShell) {
+    try {
+      const bridge = window.AndroidBridge;
+      if (typeof bridge.notificationState === 'function') nativeNotificationState = String(bridge.notificationState() || '');
+    } catch {
+      nativeNotificationState = 'unknown';
+    }
+  }
+  const nativePushLine =
+    nativeNotificationState === 'allowed'
+      ? 'Notifications allowed'
+      : nativeNotificationState === 'blocked'
+        ? 'Notifications are off on this phone; turn them on in Android settings.'
+        : 'This phone shows planner alerts in the notification tray through the Android app.';
   const pushState = nativeShell
-    ? 'This phone shows planner alerts in the notification tray through the Android app.'
+    ? nativePushLine
     : !('Notification' in window)
     ? 'This browser cannot show notifications.'
     : Notification.permission === 'granted' && S.pushEnabled
@@ -429,7 +446,9 @@ export function settingsView() {
   <div class="card"><h2>Security</h2>
     <div class="fld"><label>Current PIN</label><input id="p_cur" type="password" inputmode="numeric" autocomplete="current-password"></div>
     <div class="fld"><label>New PIN (4-12 digits)</label><input id="p_new" type="password" inputmode="numeric" autocomplete="new-password"></div>
+    <div class="fld"><label>New PIN again</label><input id="p_new2" type="password" inputmode="numeric" autocomplete="new-password"></div>
     <button class="btn" data-act="change-pin">Change PIN</button>
+    <p class="hint mut">Changing the PIN signs out every other device and leaves this one signed in. Fingerprint unlock stays on.</p>
     <div class="tw" style="margin-top:12px"><table><thead><tr><th>Device</th><th>Signed in</th><th>Status</th></tr></thead><tbody>${sessionRows}</tbody></table></div>
     <p style="margin-top:10px"><button class="btn r" data-act="revoke-sessions">Sign out all devices</button>
     <button class="btn g" data-act="logout">Sign out here</button></p></div>
