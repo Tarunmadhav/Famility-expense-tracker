@@ -603,6 +603,38 @@ public class MainActivity extends Activity {
             return insetTopDp + "," + insetBottomDp;
         }
 
+        /**
+         * Whether this phone will actually show a notification.
+         *
+         * The page cannot ask: a WebView has a Notification API of its own that
+         * has nothing to do with the tray, and the Android permission belongs to
+         * the app. Android 13+ gates the tray behind POST_NOTIFICATIONS, and every
+         * version also honours the per-app switch in system settings, so both are
+         * checked. Settings shows this instead of telling a phone user that alerts
+         * are enabled when they are not. Returns "allowed", "blocked" or
+         * "unknown" (never a bare boolean the page could misread).
+         */
+        @JavascriptInterface
+        public String notificationState() {
+            if (!onTrustedPage()) return "unknown";
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 33
+                        && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                        != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    return "blocked";
+                }
+                if (android.os.Build.VERSION.SDK_INT >= 24) {
+                    android.app.NotificationManager manager =
+                            (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                    if (manager != null && !manager.areNotificationsEnabled()) return "blocked";
+                }
+                return "allowed";
+            } catch (Exception err) {
+                // An OEM build without these APIs must not crash the settings page.
+                return "unknown";
+            }
+        }
+
             /**
              * True when this phone has a fingerprint reader or face unlock AND the
              * person has enrolled at least one. The lock screen only shows the
