@@ -382,6 +382,21 @@ function sameOrigin(request, url) {
   return true;
 }
 
+/**
+ * The provider's return leg is a top-level browser navigation, so it carries no
+ * `Origin` header and says `Sec-Fetch-Site: cross-site` — the exact shape
+ * sameOrigin() above rejects. These GETs, and only these, are exempt from the
+ * origin check: what authorises them is the state row they carry, which is
+ * single use, at most ten minutes old, PKCE-bound and owned by one account, so a
+ * cross-site page cannot mint one. Every other method and path keeps the check.
+ */
+const OAUTH_RETURN_PATH = /^\/api\/(?:cloud\/callback|auth\/oauth\/callback)\/[a-z]{1,20}$/;
+
+function isOAuthReturn(request, url) {
+  if (request.method !== 'GET') return false;
+  return OAUTH_RETURN_PATH.test(url.pathname) || url.pathname === '/api/auth/oauth/finish';
+}
+
 /** Length-independent compare for the webhook's shared verification token. */
 function constantTimeEqual(a, b) {
   const left = String(a || '');
@@ -471,8 +486,9 @@ async function enforceWriteLimit(env, userId) {
   }
 }
 
-async function requireUser(request, env, url) {
-  if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+async function requireUser(request, env, url, options = {}) {
+  const allowed = options.allowOAuthReturn === true && isOAuthReturn(request, url);
+  if (!allowed && !sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
   const token = readCookie(request, COOKIE);
   const session = await getSession(env, token);
   if (!session) throw new HttpError(401, 'Sign in required');
@@ -946,7 +962,10 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true });
   }
 
-  const { session, token } = await requireUser(request, env, url);
+  // allowOAuthReturn only relaxes the origin check for the provider's GET return
+  // legs (see isOAuthReturn); the session cookie is still required, and every
+  // other request is compared against Origin/Sec-Fetch-Site as before.
+  const { session, token } = await requireUser(request, env, url, { allowOAuthReturn: true });
 
   // Every authenticated mutation shares a per-user allowance; auth routes have
   // their own stricter limiter and are excluded here.
@@ -1316,6 +1335,9 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true });
   }
 
+  // GET only: the provider redirects the browser here, which is why this route is
+  // exempt from the origin check (isOAuthReturn). The state below is what proves
+  // the request belongs to this account, and it is burned as it is read.
   const cloudCallback = path.match(/^\/api\/cloud\/callback\/([a-z]{1,20})$/);
   if (cloudCallback && method === 'GET') {
     const provider = cloudCallback[1];
