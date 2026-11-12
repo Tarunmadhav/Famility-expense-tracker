@@ -555,6 +555,47 @@ test('/verify emails a code, verifies the chat once, and unlocks /request', asyn
   }
 });
 
+test('the data and import replies carry a link only — no amounts, no ids', async () => {
+  const { env } = await setup();
+  const owner = await signup(env, 'quiet@example.com');
+  await consumeLinkCode(
+    env,
+    (await call(env, '/api/telegram/link', { method: 'POST', cookie: owner.cookie })).data.code,
+    { telegramUserId: '700000095', chatId: '700000095' },
+  );
+
+  const stub = stubBoth();
+  try {
+    const send = sender(env, 700000095);
+    const replyTo = async (text) => {
+      stub.replies.length = 0;
+      await send(text);
+      return stub.replies[0] || '';
+    };
+
+    // Unverified: neither command may work yet.
+    assert.match(await replyTo('/request'), /Verify this chat first/);
+    assert.match(await replyTo('/upload'), /Verify this chat first/);
+
+    // Verify the chat directly (the code path itself is covered above).
+    await env.DB.prepare(`UPDATE telegram_links SET verified_at = ? WHERE telegram_user_id = ?`)
+      .bind(Date.now(), '700000095')
+      .run();
+
+    for (const command of ['/request', '/upload']) {
+      const reply = await replyTo(command);
+      assert.match(reply, new RegExp(`${ORIGIN}/#`), `${command} did not link to the app`);
+      assert.ok(!reply.includes('\u20b9'), `${command} mentioned an amount`);
+      assert.ok(!reply.includes('700000095'), `${command} echoed the chat id`);
+      assert.ok(!reply.includes('@'), `${command} mentioned an address`);
+      // Nothing is ever sent as an attachment from these commands.
+      assert.ok(!/document|sendDocument|\.csv|\.xlsx/i.test(reply), `${command} offered a file`);
+    }
+  } finally {
+    stub.restore();
+  }
+});
+
 test('a verification code expires after ten minutes', async () => {
   const { env } = await setup();
   const owner = await signup(env, 'expiry@example.com');
