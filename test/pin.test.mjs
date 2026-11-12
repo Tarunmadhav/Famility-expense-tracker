@@ -87,6 +87,31 @@ test('the current PIN must be the account’s own, never another member’s', as
   assert.equal(await verifyUserPin(env, second.id, '9999'), false);
 });
 
+async function get(env, path, cookie) {
+  return worker.fetch(
+    new Request(`${ORIGIN}${path}`, { headers: { Origin: ORIGIN, Cookie: cookie } }),
+    env,
+    { waitUntil() {} },
+  );
+}
+
+test('a PIN change signs out every other device and keeps this one', async () => {
+  const env = await setup();
+  await createUser(env, 'Owner', '1111');
+  const here = await login(env, '1111');
+  const elsewhere = await login(env, '1111');
+  assert.ok(here.cookie && elsewhere.cookie);
+  assert.notEqual(here.cookie, elsewhere.cookie, 'two sign-ins shared a session');
+
+  const changed = await changePin(env, here.cookie, { currentPin: '1111', newPin: '4321' });
+  assert.equal(changed.status, 200);
+
+  const kept = await get(env, '/api/auth/account', here.cookie);
+  assert.equal(kept.status, 200, 'the session that changed the PIN was signed out too');
+  const revoked = await get(env, '/api/auth/account', elsewhere.cookie);
+  assert.equal(revoked.status, 401, 'another device kept its session after a PIN change');
+});
+
 test('a PIN must still be 4-12 digits', async () => {
   const env = await setup();
   await createUser(env, 'First', '1111');
