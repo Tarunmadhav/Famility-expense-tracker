@@ -307,13 +307,25 @@ export async function readXlsx(buffer) {
  * Read the picked file into rows. Throws a readable Error for anything the
  * reader cannot handle, so the caller can show the reason instead of nothing.
  */
+/**
+ * An .xlsx is a zip archive, so it starts with "PK". A workbook saved with a
+ * .csv name (or renamed by a download manager) must still be read as a workbook
+ * instead of being turned into one column of binary noise.
+ */
+export function looksLikeZip(bytes) {
+  if (!bytes || bytes.length < 4) return false;
+  if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) return false;
+  return (bytes[2] === 0x03 && bytes[3] === 0x04) || (bytes[2] === 0x05 && bytes[3] === 0x06);
+}
+
 export async function readImportFile(file) {
   if (!file) throw new Error('No file chosen');
   if (tooBig(file.size)) {
     throw new Error(`That file is ${(file.size / 1048576).toFixed(1)} MB; the limit is ${MAX_IMPORT_BYTES / 1048576} MB`);
   }
   const name = String(file.name || '');
-  const isXlsx = /\.(xlsx|xlsm)$/i.test(name) || /spreadsheetml/i.test(file.type || '');
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer()).slice(0, 4);
+  const isXlsx = looksLikeZip(head) || /\.(xlsx|xlsm)$/i.test(name) || /spreadsheetml/i.test(file.type || '');
   const rows = isXlsx ? await readXlsx(await file.arrayBuffer()) : parseDelimited(await file.text());
   if (!rows.length) throw new Error('That file is empty');
   return { rows, isXlsx };

@@ -49,16 +49,6 @@ if (!file) fail('--file is required');
 if (!email) fail('--email is required (the account that owns the target book)');
 if (!book) fail('--book is required (the book name to import into)');
 
-// The Worker has the real allowlist; this is the same pair, so a typo here fails
-// before the script signs in rather than after it has written something.
-const allowEmail = String(process.env.CONTACT_IMPORT_EMAIL || '').trim().toLowerCase();
-const allowBook = String(process.env.CONTACT_IMPORT_BOOK || '').trim().toLowerCase();
-if (!allowEmail || !allowBook) {
-  fail('set CONTACT_IMPORT_EMAIL and CONTACT_IMPORT_BOOK (the same values as the Worker vars) before importing');
-}
-if (email.trim().toLowerCase() !== allowEmail) fail('--email is not the account this deployment allows contact imports for');
-if (book.trim().toLowerCase() !== allowBook) fail('--book is not the book this deployment allows contact imports into');
-
 /* ------------------------------------------------------------------ parse */
 
 const bytes = readFileSync(file);

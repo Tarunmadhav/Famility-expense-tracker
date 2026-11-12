@@ -491,4 +491,25 @@ export const MIGRATIONS = [
     // removing WhatsApp.
     statements: [`DROP TABLE IF EXISTS whatsapp_links_legacy_v12`],
   },
+  {
+    id: '0009_telegram_verify',
+    name: 'telegram chat verification: hashed email codes and a verified stamp',
+    statements: [
+      // A chat proves it can read the account's email before it may ask for a
+      // data export or an import link. Only the hash of the code is stored.
+      `ALTER TABLE telegram_links ADD COLUMN verified_at INTEGER`,
+      `CREATE TABLE IF NOT EXISTS telegram_verify_codes (
+        id TEXT PRIMARY KEY,
+        telegram_user_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        code_hash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER,
+        created_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS telegram_verify_codes_chat_idx
+         ON telegram_verify_codes (telegram_user_id, created_at DESC)`,
+    ],
+  },
 ];

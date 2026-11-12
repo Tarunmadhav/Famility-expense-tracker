@@ -11,6 +11,7 @@
 // Nothing here logs a token, a link code or a financial value.
 
 import { HttpError } from './errors.js';
+import { sendOtpEmail } from './email.js';
 
 const API = 'https://api.telegram.org';
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -48,6 +49,63 @@ export function telegramMissing(env) {
   if (!String(env.TELEGRAM_BOT_TOKEN || '').trim()) missing.push('TELEGRAM_BOT_TOKEN');
   if (!telegramWebhookConfigured(env)) missing.push('TELEGRAM_WEBHOOK_SECRET');
   return missing;
+}
+
+/**
+ * Where Telegram is actually posting updates.
+ *
+ * A token and a secret are not enough: until `setWebhook` has pointed the bot at
+ * this deployment, the bot receives nothing and never answers /link, whatever the
+ * website shows. That is what "the bot will not connect" almost always means, so
+ * the Settings card reads this instead of guessing.
+ */
+export async function webhookStatus(env, origin) {
+  if (!telegramConfigured(env)) return { ok: false, url: '', expected: '', problem: 'not-configured' };
+  const expected = `${String(origin || '').replace(/\/$/, '')}/api/telegram/webhook`;
+  try {
+    // Settings waits for this, so it must not wait forever on a slow API.
+    const res = await fetch(`${API}/bot${env.TELEGRAM_BOT_TOKEN}/getWebhookInfo`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await res.json().catch(() => null);
+    const info = (data && data.result) || {};
+    const url = String(info.url || '');
+    if (!url) return { ok: false, url, expected, problem: 'not-set' };
+    if (url !== expected) return { ok: false, url, expected, problem: 'elsewhere' };
+    // Only report a delivery error when it belongs to the address we expect; a
+    // stale error from an old deployment would otherwise look like a live fault.
+    if (info.last_error_message) return { ok: false, url, expected, problem: 'last-error' };
+    return { ok: true, url, expected, problem: '' };
+  } catch {
+    return { ok: false, url: '', expected, problem: 'unreachable' };
+  }
+}
+
+/** Point the shared bot at this deployment. Idempotent; never logs the token. */
+export async function registerWebhook(env, origin) {
+  if (!telegramConfigured(env)) {
+    throw new HttpError(
+      501,
+      `Telegram is not configured. Add ${telegramMissing(env).join(' and ')} as Worker secrets.`,
+    );
+  }
+  const url = `${String(origin || '').replace(/\/$/, '')}/api/telegram/webhook`;
+  const body = new URLSearchParams({
+    url,
+    secret_token: String(env.TELEGRAM_WEBHOOK_SECRET).trim(),
+    allowed_updates: JSON.stringify(['message', 'edited_message']),
+  });
+  const res = await fetch(`${API}/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+    signal: AbortSignal.timeout(8000),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data || data.ok !== true) {
+    throw new HttpError(502, 'Telegram refused the webhook. Check TELEGRAM_BOT_TOKEN and the deployment URL.');
+  }
+  return { ok: true, url };
 }
 
 /* ------------------------------------------------------------------ codes */
@@ -115,16 +173,14 @@ export async function consumeLinkCode(env, code, { telegramUserId, chatId, usern
   }
   if (!match) return { ok: false, reason: 'expired' };
 
-  const claimed = await env.DB.prepare(
-    `UPDATE telegram_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
-  )
-    .bind(Date.now(), match.id)
-    .run();
-  if (!((claimed.meta && claimed.meta.changes) || 0)) return { ok: false, reason: 'expired' };
-
   // One identity per account and one account per identity. A live link on either
   // side means the person must unlink first, which keeps a shared family phone
   // from silently taking over somebody else's alerts.
+  //
+  // This check runs BEFORE the code is claimed. It used to run after, so a chat
+  // that was already linked burned the fresh code while refusing the link, and
+  // every retry then answered "not valid or expired" — the bot looked broken
+  // even though the only problem was the old link.
   const taken = await env.DB.prepare(
     `SELECT user_id, telegram_user_id FROM telegram_links
       WHERE revoked_at IS NULL AND (user_id = ? OR telegram_user_id = ?) LIMIT 1`,
@@ -137,6 +193,13 @@ export async function consumeLinkCode(env, code, { telegramUserId, chatId, usern
       reason: taken.user_id === match.user_id ? 'account-linked' : 'identity-linked',
     };
   }
+
+  const claimed = await env.DB.prepare(
+    `UPDATE telegram_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+  )
+    .bind(Date.now(), match.id)
+    .run();
+  if (!((claimed.meta && claimed.meta.changes) || 0)) return { ok: false, reason: 'expired' };
 
   await env.DB.prepare(
     `INSERT INTO telegram_links (id, user_id, telegram_user_id, chat_id, username, preview, created_at)
@@ -375,15 +438,110 @@ export async function deliverPending(env, { limit = 20, fetchImpl = fetch, now =
   return { sent, skipped };
 }
 
+/* ------------------------------------------------------------ verification */
+
+const VERIFY_TTL_MS = 10 * 60_000;
+const VERIFY_LENGTH = 6;
+
+function randomVerifyCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(VERIFY_LENGTH));
+  let out = '';
+  for (let i = 0; i < VERIFY_LENGTH; i += 1) out += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+  return out;
+}
+
+/**
+ * Issue a short-lived code for one chat. Only its hash is kept, a new request
+ * replaces the previous code, and it is consumed in the same statement that
+ * checks it is still live.
+ */
+export async function issueVerifyCode(env, { telegramUserId, chatId, now = Date.now() }) {
+  const code = randomVerifyCode();
+  const salt = toHex(crypto.getRandomValues(new Uint8Array(16)));
+  await env.DB.prepare(`DELETE FROM telegram_verify_codes WHERE telegram_user_id = ? AND used_at IS NULL`)
+    .bind(String(telegramUserId))
+    .run();
+  await env.DB.prepare(
+    `INSERT INTO telegram_verify_codes (id, telegram_user_id, chat_id, code_hash, salt, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      crypto.randomUUID(),
+      String(telegramUserId),
+      String(chatId),
+      await hashCode(code, salt),
+      salt,
+      now + VERIFY_TTL_MS,
+      now,
+    )
+    .run();
+  return { code, minutes: VERIFY_TTL_MS / 60_000 };
+}
+
+/** Email a code to the address on the linked account. Throws 501 when email is off. */
+export async function startVerification(env, link) {
+  const own = await env.DB.prepare(`SELECT email FROM credentials WHERE user_id = ?`).bind(link.user_id).first();
+  if (!own || !String(own.email || '').trim()) return { ok: false, reason: 'no-email' };
+  const { code, minutes } = await issueVerifyCode(env, {
+    telegramUserId: link.telegram_user_id,
+    chatId: link.chat_id,
+  });
+  await sendOtpEmail(env, { to: own.email, code, minutes });
+  return { ok: true, minutes };
+}
+
+/** Redeem a code for this chat. A used or expired code is refused. */
+export async function consumeVerifyCode(env, code, { telegramUserId, now = Date.now() } = {}) {
+  const clean = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!clean) return false;
+  const rows = (
+    await env.DB.prepare(
+      `SELECT id, code_hash, salt FROM telegram_verify_codes
+        WHERE telegram_user_id = ? AND used_at IS NULL AND expires_at > ?`,
+    )
+      .bind(String(telegramUserId || ''), now)
+      .all()
+  ).results || [];
+  for (const row of rows) {
+    if ((await hashCode(clean, row.salt)) === row.code_hash) {
+      const claimed = await env.DB.prepare(
+        `UPDATE telegram_verify_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+      )
+        .bind(now, row.id)
+        .run();
+      if (!((claimed.meta && claimed.meta.changes) || 0)) return false;
+      await env.DB.prepare(
+        `UPDATE telegram_links SET verified_at = ? WHERE telegram_user_id = ? AND revoked_at IS NULL`,
+      )
+        .bind(now, String(telegramUserId))
+        .run();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** /logout: this chat stops receiving messages and loses its verification. */
+export async function endChatSession(env, link) {
+  await unlinkTelegram(env, link.user_id);
+  await env.DB.prepare(`DELETE FROM telegram_verify_codes WHERE telegram_user_id = ?`)
+    .bind(String(link.telegram_user_id))
+    .run();
+}
+
 /* --------------------------------------------------------------- commands */
 
 const HELP = [
   'Family Finance Planner',
   '',
   '/link CODE — connect this chat to your planner account',
+  '/verify — email a code to confirm this chat',
   '/status — what this chat is connected to',
   '/settings — choose how much alerts show',
+  '/request — a link to export your data',
+  '/upload — a link to import contacts',
   '/unlink — stop all messages to this chat',
+  '/logout — unlink and end this chat’s verification',
   '/help — this list',
 ].join('\n');
 
@@ -411,7 +569,7 @@ async function statusText(env, link) {
  * Handle one Bot API update. Returns the reply text, or '' when the update needs
  * no answer. Never throws: the webhook answers 200 so Telegram stops retrying.
  */
-export async function handleUpdate(env, update) {
+export async function handleUpdate(env, update, origin = '') {
   const message = update && (update.message || update.edited_message);
   if (!message) return '';
   const chat = message.chat || {};
@@ -425,15 +583,20 @@ export async function handleUpdate(env, update) {
   const [rawCommand, ...rest] = text.split(/\s+/);
   const command = rawCommand.toLowerCase().replace(/@.*$/, '');
   const argument = rest.join(' ').trim();
+  const appUrl = String(origin || '').replace(/\/$/, '');
 
   if (command === '/start' || command === '/help' || command === '') {
-    const link = await linkForTelegram(env, telegramUserId);
-    if (link && link.blocked_at) {
-      await env.DB.prepare(`UPDATE telegram_links SET blocked_at = NULL WHERE id = ?`).bind(link.id).run();
+    const linked = await linkForTelegram(env, telegramUserId);
+    if (linked && linked.blocked_at) {
+      await env.DB.prepare(`UPDATE telegram_links SET blocked_at = NULL WHERE id = ?`).bind(linked.id).run();
     }
-    return link
-      ? `${HELP}\n\nThis chat is already connected.`
-      : `${HELP}\n\nTo connect: open the planner → Settings → Notifications → Connect Telegram, then send /link CODE here.`;
+    if (!linked) {
+      return `${HELP}\n\nTo connect: open the planner → Settings → Notifications → Connect Telegram, then send /link CODE here.`;
+    }
+    if (!linked.verified_at) {
+      return `This chat is connected but not verified yet. Send /verify and I will email a code to the address on your account.\n\n${HELP}`;
+    }
+    return `${HELP}\n\nThis chat is already connected and verified.`;
   }
 
   if (command === '/link') {
@@ -444,16 +607,46 @@ export async function handleUpdate(env, update) {
       chatId,
       username: message.from && message.from.username,
     });
-    if (out.ok) return 'Connected. You will get planner alerts in this chat. Send /settings to choose how much they show.';
+    if (out.ok) {
+      return 'Connected. Send /verify to confirm this chat with a code emailed to you; /request and /upload need it.';
+    }
     if (out.reason === 'account-linked') return 'That planner account is already connected to a Telegram chat. Send /unlink there first.';
     if (out.reason === 'identity-linked') return 'This Telegram account is already connected to a planner. Send /unlink first.';
     return 'That code is not valid or has expired. Create a new one in the planner.';
   }
 
   const link = await linkForTelegram(env, telegramUserId);
+
+  if (command === '/logout') {
+    if (!link) return 'This chat is not connected, so there is nothing to sign out of.';
+    await endChatSession(env, link);
+    return 'Signed out. This chat will not receive planner messages until you link it again. The app and the website stay signed in.';
+  }
+
   if (!link) return 'This chat is not connected yet. Open the planner → Settings → Notifications → Connect Telegram.';
 
-  if (command === '/status') return statusText(env, link);
+  if (command === '/verify') {
+    if (argument) {
+      const ok = await consumeVerifyCode(env, argument, { telegramUserId });
+      return ok
+        ? 'This chat is verified. /request and /upload are available now.'
+        : 'That code is not valid or has expired. Send /verify for a new one.';
+    }
+    let sent;
+    try {
+      sent = await startVerification(env, link);
+    } catch (err) {
+      return err && err.status === 501
+        ? 'Email is not configured on this deployment, so no code can be sent.'
+        : 'The code could not be sent. Try again in a minute.';
+    }
+    if (!sent.ok) return 'This account has no email address on file, so it cannot be verified here.';
+    return `A code is on its way to the email on your account. It expires in ${sent.minutes} minutes. Reply /verify CODE with it.`;
+  }
+
+  if (command === '/status') {
+    return [await statusText(env, link), `Verified: ${link.verified_at ? 'yes' : 'no — send /verify'}`].join('\n');
+  }
 
   if (command === '/settings') {
     const choice = argument.toLowerCase();
@@ -469,6 +662,13 @@ export async function handleUpdate(env, update) {
       'Send /settings generic — “You have a new planner alert.”',
       'Send /settings detailed — include the title and amount.',
     ].join('\n');
+  }
+
+  if (command === '/request' || command === '/upload') {
+    if (!link.verified_at) return 'Verify this chat first: send /verify, then the code from your email.';
+    return command === '/request'
+      ? `Your data is here: ${appUrl}/#data\nSign in to the planner to download it. Files and amounts are never sent in this chat.`
+      : `Import contacts here: ${appUrl}/#contacts\nChoose the file in the planner; it is never sent to this chat.`;
   }
 
   if (command === '/unlink') {

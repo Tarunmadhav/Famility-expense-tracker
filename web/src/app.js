@@ -150,7 +150,33 @@ function setView(view, message = '') {
 
 /* ---------------------------------------------------------------- render */
 
+let renderFrame = 0;
+
+/**
+ * Paint once per frame.
+ *
+ * Every action rebuilt the whole shell synchronously, and a burst (a live event,
+ * a notification, a toast) rebuilt it several times for one visible change. On a
+ * phone that is what made taps feel like they were lagging behind the finger.
+ * Coalescing keeps the last state — the only one anybody sees — and paints once.
+ */
 function render() {
+  // A hidden document fires no frames, so paint through directly: renderNow()
+  // records the dirty flag and returns without touching the DOM.
+  if (typeof document !== 'undefined' && document.hidden) {
+    renderNow();
+    return;
+  }
+  if (renderFrame) return;
+  const run = () => {
+    renderFrame = 0;
+    renderNow();
+  };
+  if (typeof requestAnimationFrame === 'function') renderFrame = requestAnimationFrame(run);
+  else run();
+}
+
+function renderNow() {
   // Nothing paints behind a backgrounded app; remembering that it is out of date
   // avoids a burst of layout work on every wake-up while it is invisible.
   if (document.hidden && S.view === 'app' && !S.locked) {
@@ -265,9 +291,11 @@ async function boot() {
     if (signin === 'denied') toast('Sign-in was cancelled in the browser.');
     // The drive connect flow comes back from the provider with a short status flag.
     const cloud = params.get('cloud');
+    const why = params.get('why');
+    const tag = why ? ` (${why})` : '';
     if (cloud === 'connected') toast('Drive connected — back up or restore from Settings');
-    if (cloud === 'denied') toast('The drive connection was cancelled');
-    if (cloud === 'failed') toast('That drive could not be connected. Try again from Settings.');
+    if (cloud === 'denied') toast(`The drive connection was cancelled${tag}`);
+    if (cloud === 'failed') toast(`That drive could not be connected${tag}. Try again from Settings.`);
     bootTab = params.get('tab') === 'settings' ? 'settings' : '';
     if (signin || cloud || params.get('tab')) window.history.replaceState({}, '', window.location.pathname);
   } catch {
@@ -290,7 +318,10 @@ async function boot() {
     S.pushPublicKey = status.push ? S.pushPublicKey : null;
     // The update check is a second round-trip that nothing on screen waits for, so
     // it runs after the planner is painted instead of in front of it.
-    loadApp().then(() => applyDeepLinkProfile());
+    loadApp().then(async () => {
+      await applyDeepLinkProfile();
+      applyDeepLinkHash();
+    });
     checkForUpdate().catch(() => {});
   } catch (err) {
     setView('login', `Cannot reach the planner API: ${err.message}`);
@@ -366,6 +397,22 @@ async function applyDeepLinkProfile() {
   if (!wanted || wanted === S.profileId) return;
   if (!(S.profiles || []).some((p) => p.id === wanted)) return;
   await switchProfile(wanted);
+  try {
+    window.history.replaceState({}, '', window.location.pathname);
+  } catch {
+    /* history is decorative here */
+  }
+}
+
+/** `/#data` and `/#contacts` are the pages the Telegram bot links to. */
+function applyDeepLinkHash() {
+  const wanted = String(window.location.hash || '').replace(/^#/, '').toLowerCase();
+  if (!wanted) return;
+  const tab = wanted === 'data' || wanted === 'settings' ? 'settings' : wanted === 'contacts' ? 'contacts' : '';
+  if (!tab) return;
+  S.tab = tab;
+  const ready = tab === 'settings' ? loadSettingsData().catch(() => {}) : Promise.resolve();
+  ready.then(() => render());
   try {
     window.history.replaceState({}, '', window.location.pathname);
   } catch {
@@ -1022,7 +1069,7 @@ document.addEventListener('click', async (event) => {
       await guard(async () => {
         await api.telegramUnlink();
         S.telegramCode = '';
-        S.telegram = await api.telegramState().catch(() => ({ configured: false }));
+        S.telegram = await api.telegramState(true).catch(() => ({ configured: false }));
         render();
         toast('This chat will not receive planner alerts any more');
       });
@@ -1031,11 +1078,97 @@ document.addEventListener('click', async (event) => {
       await guard(async () => {
         const choice = document.getElementById('tg_preview').value;
         await api.telegramPrefs(choice);
-        S.telegram = await api.telegramState().catch(() => S.telegram);
+        // Keep the webhook line visible: dropping it here used to make the
+        // "bot is not connected" warning disappear until Settings was reopened.
+        S.telegram = await api.telegramState(true).catch(() => S.telegram);
         render();
         toast(choice === 'detailed' ? 'Alerts will include amounts' : 'Alerts will show a generic preview');
       });
       return undefined;
+    case 'tg-webhook':
+      await guard(async () => {
+        await api.telegramRegisterWebhook();
+        S.telegram = await api.telegramState(true).catch(() => S.telegram);
+        render();
+        toast('The bot is now connected to this website');
+      }, 'Telegram refused the webhook');
+      return undefined;
+    case 'bio-unlock': {
+      // The Android shell asks the system for a fingerprint/face check and calls
+      // back into the page. Three things keep this from becoming a bypass:
+      //   1. only one prompt can be outstanding at a time (settled/timer);
+      //   2. a pass still has to be confirmed against the live server session, so
+      //      a revoked session cannot be unlocked with a finger;
+      //   3. nothing is painted until that check succeeds, and any answer other
+      //      than "ok" leaves the lock screen exactly as it was.
+      const bridge = window.AndroidBridge;
+      if (!bridge || typeof bridge.promptBiometric !== 'function') {
+        return toast('Biometric unlock is not available on this device');
+      }
+      if (window.__plannerBiometric) {
+        return toast('Waiting for the fingerprint prompt');
+      }
+      let settled = false;
+      let timer = 0;
+      const finish = async (ok) => {
+        if (settled) return;
+        settled = true;
+        window.__plannerBiometric = null;
+        if (timer) clearTimeout(timer);
+        if (!ok) {
+          S.lockError = 'Not recognised. Use your PIN instead.';
+          render();
+          return;
+        }
+        let status = null;
+        try {
+          status = await api.authStatus();
+        } catch {
+          // Offline or the server is unreachable: fail closed, keep the lock, and
+          // offer the PIN. Sending somebody to the sign-in screen on a dropped
+          // signal would lose the session for no reason.
+          S.lockError = 'Could not reach the server. Use your PIN instead.';
+          render();
+          return;
+        }
+        if (!status || !status.user) {
+          // The session really ended (signed out elsewhere, expired, revoked). Do
+          // not repaint the planner from a stale in-memory state.
+          S.locked = false;
+          S.lockError = '';
+          S.db = emptyDb();
+          setView('login', 'Your session ended. Sign in again.');
+          return;
+        }
+        S.lockError = '';
+        S.locked = false;
+        lastActive = Date.now();
+        await loadApp();
+      };
+      window.__plannerBiometric = finish;
+      // A prompt that never answers (destroyed activity, sensor wedged) must fall
+      // back to the PIN instead of leaving a dead lock screen.
+      timer = setTimeout(() => {
+        finish(false);
+        S.lockError = 'The fingerprint prompt did not answer. Use your PIN.';
+        render();
+      }, 90_000);
+      try {
+        if (bridge.promptBiometric() === false) {
+          settled = true;
+          clearTimeout(timer);
+          window.__plannerBiometric = null;
+          S.lockError = 'No fingerprint or face is set up on this phone. Use your PIN.';
+          render();
+        }
+      } catch {
+        settled = true;
+        clearTimeout(timer);
+        window.__plannerBiometric = null;
+        toast('Biometric unlock is not available');
+      }
+      return undefined;
+    }
     case 'cloud-link':
       await guard(async () => {
         const out = await api.cloudLinkStart(id);
@@ -1184,10 +1317,6 @@ document.addEventListener('click', async (event) => {
       download(`${COLLECTIONS[collection].label.replace(/\W+/g, '_')}.csv`, csvOf(collection), 'text/csv;charset=utf-8');
       return undefined;
     case 'impcsv':
-      if (collection === 'contacts' && !S.canImportContacts) {
-        toast('Contact import is not enabled for this account');
-        return undefined;
-      }
       return importFile(collection);
     case 'saveset':
       return saveSettings();
@@ -1645,7 +1774,10 @@ async function loadSettingsData() {
     S.cloudState = cloud.settings || { enabled: false, frequency: 'daily', keep: 7, provider: null };
     S.backupRuns = cloud.runs || [];
     S.backupKeyConfigured = Boolean(cloud.keyConfigured);
-    S.telegram = await api.telegramState().catch(() => ({ configured: false }));
+    // This runs when Settings opens, so it is the right place to pay for the
+    // webhook probe: one request that tells the card whether Telegram is really
+    // posting to this deployment.
+    S.telegram = await api.telegramState(true).catch(() => ({ configured: false }));
     S.calendarFeed = (await api.calendarFeedUrl(S.profileId).catch(() => ({}))).url || '';
     S.security = {
       twoFactor: Boolean(twofa.enabled),

@@ -583,6 +583,16 @@ export function normaliseEmail(email) {
  * for sign-in, which is the wrong question for an already-authenticated session:
  * a member must not be able to authorise a password change with the owner's PIN.
  */
+/** Does this account actually have a PIN, or does it sign in with a password? */
+export async function accountHasPin(env, userId) {
+  const row = await env.DB.prepare(
+    `SELECT 1 AS ok FROM users WHERE id = ? AND length(pin_hash) > 0`,
+  )
+    .bind(String(userId))
+    .first();
+  return Boolean(row);
+}
+
 export async function verifyUserPin(env, userId, pin) {
   const row = await env.DB.prepare(
     `SELECT pin_hash, pin_salt, iterations FROM users WHERE id = ? AND length(pin_hash) > 0`,
@@ -895,8 +905,16 @@ export async function deleteUserSessions(env, userId, keepSessionId) {
   }
 }
 
-export async function updatePin(env, pin) {
-  const user = await env.DB.prepare(`SELECT id FROM users ORDER BY created_at LIMIT 1`).first();
+/**
+ * Rewrite one account's PIN.
+ *
+ * Scoped to the signed-in account on purpose. The old version picked
+ * `ORDER BY created_at LIMIT 1`, so a change requested by a second member (or by
+ * anyone after the first account was gone) rewrote the wrong row: the screen
+ * said it worked and the PIN that was typed still did not work.
+ */
+export async function updatePin(env, userId, pin) {
+  const user = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`).bind(String(userId)).first();
   if (!user) return null;
   const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
   const hash = await derivePin(pin, salt, PBKDF2_ITERATIONS);

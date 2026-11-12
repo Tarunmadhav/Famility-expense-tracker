@@ -43,6 +43,24 @@ export function integrationStatus({ label = 'Integration', configured = true, li
   return { state: 'on', text: `${label} connected` };
 }
 
+/**
+ * The bot only answers when Telegram knows this deployment's webhook. Until then
+ * /link is a message nobody receives, which reads exactly like "the bot is not
+ * connecting". Show the state and offer the one click that fixes it.
+ */
+function telegramWebhookHtml(tg) {
+  const wh = tg && tg.webhook;
+  if (!wh || wh.ok || !tg.configured) return '';
+  const reason = {
+    'not-set': 'Telegram has no webhook for this bot yet, so it never receives /link and never replies.',
+    elsewhere: 'Telegram sends this bot somewhere else, so codes sent here are never read.',
+    'last-error': 'Telegram could not reach the webhook address the last time it tried.',
+  }[wh.problem];
+  if (!reason) return '';
+  return `<p class="hint mut">${esc(reason)}</p>
+    <button class="btn s" data-act="tg-webhook">Connect the bot to this site</button>`;
+}
+
 export function statusLine(status = {}) {
   return `<p class="statusline" data-state="${esc(status.state || 'off')}">${esc(status.text || '')}</p>`;
 }
@@ -227,10 +245,7 @@ export function tableView(collection) {
     const rels = [...new Set((S.db.contacts || []).map((c) => c.rel).filter(Boolean))].sort();
     html += `<select data-f="rel"><option value="">All relationships</option>${rels.map((r) => `<option${S.filter.rel === r ? ' selected' : ''}>${esc(r)}</option>`).join('')}</select>`;
   }
-  // The server refuses a contact import from any other account or book; hiding
-  // the button for them is only a convenience, not the check.
-  const canImport = collection !== 'contacts' || S.canImportContacts;
-  html += `<button class="btn" style="background:${def.dark}" data-act="add" data-ek="${collection}">+ Add</button><button class="btn g" data-act="csv" data-ek="${collection}">Export</button><button class="btn g" data-act="template" data-ek="${collection}">Template</button>${canImport ? `<button class="btn g" data-act="impcsv" data-ek="${collection}">Import</button>` : ''}`;
+  html += `<button class="btn" style="background:${def.dark}" data-act="add" data-ek="${collection}">+ Add</button><button class="btn g" data-act="csv" data-ek="${collection}">Export</button><button class="btn g" data-act="template" data-ek="${collection}">Template</button><button class="btn g" data-act="impcsv" data-ek="${collection}">Import</button>`;
   html += `<span class="mut right">${total.toLocaleString('en-IN')} row${total === 1 ? '' : 's'}</span></div>`;
 
   html += `<div class="tw"><table style="--tint:${def.tint};--dark:${def.dark}"><thead><tr>`;
@@ -353,8 +368,10 @@ export function settingsView() {
       <div class="fld"><label>Theme</label><div class="seg"><button data-act="theme" data-theme="light" class="${S.theme !== 'dark' ? 'on' : ''}">Light</button><button data-act="theme" data-theme="dark" class="${S.theme === 'dark' ? 'on' : ''}">Dark</button></div></div>
       <div class="fld"><label>Lock automatically after</label><select id="s_lock">${[[0.5, '30 seconds'], [1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [0, 'Off (not recommended)']].map(([v, l]) => `<option value="${v}"${Number(S.lockMinutes) === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
     </div>
-    <div class="fld"><label>Custom timeout (seconds, 15-86400)</label><div class="tools" style="margin:0"><input id="s_lock_custom" type="number" min="15" max="86400" value="${Math.round((Number(S.lockMinutes) || 5) * 60)}" style="max-width:160px"><button class="btn s g" data-act="save-lock">Use custom</button></div></div>
-    <p class="hint mut">The screen locks after that much inactivity and asks for your PIN or password again. Locking also clears the loaded data from this tab. <button class="linkbtn" data-act="lock">Lock now</button></p>
+    <details class="subfold"><summary class="mut">Use a custom timeout instead</summary>
+      <div class="tools" style="margin:8px 0 0"><input id="s_lock_custom" type="number" min="15" max="86400" value="${Math.round((Number(S.lockMinutes) || 5) * 60)}" style="max-width:160px"><button class="btn s g" data-act="save-lock">Use custom</button></div>
+    </details>
+    <p class="hint mut">The screen locks after that much inactivity and asks for your PIN, password or fingerprint. Locking also clears the loaded data from this tab. <button class="linkbtn" data-act="lock">Lock now</button></p>
     <h3>Books</h3>
     <p class="hint mut">Switch with Family / Mine at the top. <b>Family</b> is the shared household book every member sees. <b>Mine</b> is private to your login — nobody else, including other family members, can read it.</p>
     <div class="seg" role="group" aria-label="Profiles">${(S.profiles || [])
@@ -388,14 +405,14 @@ export function settingsView() {
         .join('') || '<tr><td colspan="4" class="mut">No audit events yet</td></tr>'}</tbody></table></div>
     </details>
   </div>
-  <div class="card"><h2>AI tools</h2>
+  <details class="card fold"><summary><h2>AI tools</h2><span class="foldmeta">${(S.aiConnections || []).length ? `${S.aiConnections.length} connected` : 'optional'}</span></summary>
     <p class="mut">Connect any OpenAI-compatible provider (OpenAI, Z.ai GLM, Groq, OpenRouter). The key is stored on the server, never sent to the browser, and only used when you scan a bill.</p>
     ${(S.aiConnections || []).length ? `<div class="tw"><table><thead><tr><th>Provider</th><th>Model</th><th>Base URL</th><th></th></tr></thead><tbody>${S.aiConnections.map((c) => `<tr><td>${esc(c.provider)}</td><td>${esc(c.model)}</td><td class="mut">${esc(c.base_url)}</td><td class="act"><button class="btn s g" data-act="ai-test" data-id="${esc(c.id)}">Test</button> <button class="btn s r" data-act="ai-del" data-id="${esc(c.id)}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mut">No AI tool connected yet — bill scanning needs one.</p>'}
     <div class="fld" style="margin-top:10px"><label>Provider name</label><input id="ai_provider" placeholder="OpenAI / Z.ai / Groq"></div>
     <div class="fld"><label>Base URL</label><input id="ai_url" placeholder="https://api.openai.com/v1"></div>
     <div class="fld"><label>Model with image support</label><input id="ai_model" placeholder="gpt-4o-mini / glm-4v"></div>
     <div class="fld"><label>API key</label><input id="ai_key" type="password" autocomplete="off" placeholder="Stored on the server"></div>
-    <button class="btn" data-act="ai-add">Connect AI tool</button></div>
+    <button class="btn" data-act="ai-add">Connect AI tool</button></details>
   <h2 class="grouphead">Notifications</h2>
   <div class="card" id="card-telegram"><h2>Telegram</h2>
     ${statusLine(integrationStatus({
@@ -404,6 +421,7 @@ export function settingsView() {
       linked: Boolean(S.telegram && S.telegram.link),
       missing: (S.telegram && S.telegram.missing) || ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET'],
     }))}
+    ${telegramWebhookHtml(S.telegram)}
     ${(!S.telegram || S.telegram.configured === false)
       ? `<p class="hint mut">Add the missing Worker secrets above and point the bot's webhook at <code>/api/telegram/webhook</code>.</p>
           <div class="tools">${tgChatLink(S.telegram)}</div>`
@@ -450,7 +468,7 @@ export function settingsView() {
       <p class="hint mut">The URL is a secret: anyone who has it can read your event titles, so use <b>New URL</b> if it leaks. It only ever contains the books you are a member of.</p>
     </details></div>
   <h2 class="grouphead">Backup</h2>
-  <div class="card"><h2>Backup</h2>
+  <div class="card"><h2>Google Drive</h2>
     <p class="mut" style="margin-top:0">Keep a full copy of every book you can open in <b>your own</b> Google Drive.
       The file is versioned JSON with a SHA-256 checksum, and the connection keeps a revocable token for the account you pick —
       the app never sees your drive password, and it can only reach its own private app folder.</p>
@@ -472,7 +490,9 @@ export function settingsView() {
                <button class="btn s g" data-act="cloud-list" data-id="${esc(p.id)}">Restore…</button>
                <button class="btn s r" data-act="cloud-unlink" data-id="${esc(p.id)}">Disconnect</button>`
             : p.configured
-              ? `<button class="btn s" data-act="cloud-link" data-id="${esc(p.id)}">Connect Google Drive</button>`
+              ? S.backupKeyConfigured === false
+                ? '<span class="mut" style="font-size:12px">Owner must set BACKUP_KEY first</span>'
+                : `<button class="btn s" data-act="cloud-link" data-id="${esc(p.id)}">Connect Google Drive</button>`
               : '<span class="mut" style="font-size:12px">Not set up</span>'}
         </span>
       </div>
@@ -532,9 +552,9 @@ export function settingsView() {
     <p class="hint mut">Restoring validates the file first, shows how many records it holds, asks for confirmation, and merges by id — it never wipes the profile first. A backup only contains the profile it was made from.</p>
   </div>
   <h2 class="grouphead">Data</h2>
-  <div class="card"><h2>Documents drive</h2>
-    <p class="mut">${(S.files || []).length} file${(S.files || []).length === 1 ? '' : 's'} · ${((S.filesTotal || 0) / 1048576).toFixed(2)} MB used${S.storage === false ? ' · storage is not configured for this site' : ''}. Bills and policy documents you attach are kept here.</p>
-    ${(S.files || []).length ? `<div class="tw"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Added</th><th></th></tr></thead><tbody>${S.files.map((f) => `<tr><td><a href="/api/files/${esc(f.id)}" target="_blank" rel="noopener">${esc(f.name)}</a></td><td class="mut">${esc(String(f.mime).split('/')[1] || f.mime)}</td><td class="num">${Math.round(Number(f.size) / 1024)} KB</td><td class="mut">${esc(relative(f.created_at))}</td><td class="act"><button class="btn s r" data-act="drive-del" data-id="${esc(f.id)}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mut">Nothing uploaded yet — attach a bill from the Expenses form.</p>'}</div>
+  <details class="card fold"><summary><h2>Documents drive</h2><span class="foldmeta">${(S.files || []).length} file${(S.files || []).length === 1 ? '' : 's'} · ${((S.filesTotal || 0) / 1048576).toFixed(2)} MB</span></summary>
+    <p class="mut">Bills and policy documents you attach are kept here.${S.storage === false ? ' Storage is not configured for this site.' : ''}</p>
+    ${(S.files || []).length ? `<div class="tw"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Added</th><th></th></tr></thead><tbody>${S.files.map((f) => `<tr><td><a href="/api/files/${esc(f.id)}" target="_blank" rel="noopener">${esc(f.name)}</a></td><td class="mut">${esc(String(f.mime).split('/')[1] || f.mime)}</td><td class="num">${Math.round(Number(f.size) / 1024)} KB</td><td class="mut">${esc(relative(f.created_at))}</td><td class="act"><button class="btn s r" data-act="drive-del" data-id="${esc(f.id)}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mut">Nothing uploaded yet — attach a bill from the Expenses form.</p>'}</details>
   <div class="card"><h2>My data</h2>
     <p class="mut">A copy of <b>${esc(S.profile ? S.profile.name : 'this book')}</b> only — the book you are looking at, not the other books or another member's data. Both files land in your Downloads folder and open without a network connection.</p>
     <div class="tools" style="flex-wrap:wrap">
@@ -550,7 +570,9 @@ export function settingsView() {
     <div class="tools" style="margin-top:12px"><button class="btn g" data-act="sample-data">Load sample data</button>
       <button class="btn r" data-act="clear-data">Clear all data</button></div>
     <p class="hint mut" style="margin-top:8px">Clearing removes every contact, bill, expense, policy, task and document for all books. Accounts and settings stay.</p></div>
-  <div class="card"><h2>Recent changes</h2><div class="tw"><table><thead><tr><th>Record</th><th>Module</th><th>Action</th><th>When</th></tr></thead><tbody>${activityRows}</tbody></table></div></div>
+  <details class="card fold"><summary><h2>Recent changes</h2></summary>
+    <div class="tw"><table><thead><tr><th>Record</th><th>Module</th><th>Action</th><th>When</th></tr></thead><tbody>${activityRows}</tbody></table></div>
+  </details>
   <h2 class="grouphead">About</h2>
   <div class="card"><h2>About</h2>
     <div class="mrow"><span>Version</span><b>${esc(S.release && S.release.version ? S.release.version : S.account.version || '')}</b></div>
@@ -648,6 +670,7 @@ export function lockHtml(message = '') {
     <div class="brand"><span class="logo">₹</span><div><h1>Family Finance Planner</h1><div class="mut">Locked after inactivity</div></div></div>
     <h2>Unlock to continue</h2>
     <p>Your data was cleared from this screen while it was locked.</p>
+    ${biometricButtonHtml()}
     <form id="lockfrm"><input id="lockpin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="12" placeholder="••••" aria-label="PIN">
       <button class="btn">Unlock</button></form>
     <div class="lockerr" id="lockerr">${esc(message)}</div>
@@ -657,6 +680,22 @@ export function lockHtml(message = '') {
       <div class="fld"><label for="lockpass">Password</label><input id="lockpass" type="password" autocomplete="current-password"></div>
       <button class="btn">Unlock</button>
     </form></div></div>`;
+}
+
+/**
+ * The Android shell can check a fingerprint or face on the device. Node has no
+ * bridge, and a browser has none either, so this is asked per render and never
+ * assumed. A throw from the bridge just means "no button".
+ */
+function biometricButtonHtml() {
+  try {
+    const bridge = typeof window !== 'undefined' ? window.AndroidBridge : null;
+    if (!bridge || typeof bridge.hasBiometric !== 'function') return '';
+    if (!bridge.hasBiometric()) return '';
+    return '<button class="btn g bio" data-act="bio-unlock">Unlock with fingerprint or face</button>';
+  } catch {
+    return '';
+  }
 }
 
 function socialButtonsHtml() {

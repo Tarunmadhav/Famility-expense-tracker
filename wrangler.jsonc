@@ -22,13 +22,7 @@
     // Resend sender. onboarding@resend.dev is Resend's own test address: it only
     // delivers to the Resend account owner, so replace it with an address on a
     // verified domain before other family members sign in by email code.
-    "MAIL_FROM": "onboarding@resend.dev",
-    // Contact import allowlist: one account email and one book name. Leave both
-    // empty and contact import is off for every account (the button is hidden and
-    // POST /api/records/bulk answers 403). Set them in the Cloudflare dashboard
-    // rather than here if this repository is public.
-    "CONTACT_IMPORT_EMAIL": "",
-    "CONTACT_IMPORT_BOOK": ""
+    "MAIL_FROM": "onboarding@resend.dev"
   },
   "d1_databases": [
     {

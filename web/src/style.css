@@ -407,3 +407,153 @@ input.search { flex: 1 1 220px; min-width: 160px; }
   .btn.s, .btn.xs { min-height: 38px; }
   td.act .btn { min-height: 38px; }
 }
+
+/* ======================================================= modern surface
+   v2.4: a calmer, denser surface. The tokens below override the older greys
+   with a slate/teal system, soften every radius, and make one accent do the
+   work that used to be spread over black buttons and coloured bars. Layout is
+   unchanged, so nothing that worked before has to be relearned. */
+
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --ink: #121418;
+  --mute: #6b7280;
+  --line: #e6e8ec;
+  --tint: #f1f3f6;
+  --accent: #0f766e;
+  --accent-ink: #ffffff;
+  --ok: #0f766e;
+  --bad: #b42318;
+  --warn: #b45309;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 1px 3px rgba(16, 24, 40, .04);
+  --navy: #0f172a;
+  --radius: 14px;
+  --radius-sm: 10px;
+}
+
+[data-theme="dark"] {
+  --bg: #0c0e12;
+  --card: #14171d;
+  --ink: #e7e9ee;
+  --mute: #9aa1ad;
+  --line: #242832;
+  --tint: #1a1e25;
+  --accent: #2dd4bf;
+  --accent-ink: #06201d;
+  --ok: #34d399;
+  --bad: #f87171;
+  --warn: #fbbf24;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .45);
+  --navy: #e7e9ee;
+}
+
+html, body { font-size: 14px; letter-spacing: -.005em; }
+header, .topbar { backdrop-filter: saturate(140%) blur(8px); }
+
+.card, .kpi, .member, .authcard, .lockbox, .modal .box {
+  border-radius: var(--radius);
+  border-color: var(--line);
+  box-shadow: var(--shadow);
+}
+.card { padding: 16px; }
+.card > h2 { font-size: 14px; font-weight: 650; letter-spacing: -.01em; }
+.card h3 { font-size: 11px; letter-spacing: .07em; }
+
+/* A fold is a card whose body is optional. The summary is a button-like row so
+   settings stop reading as one long wall of forms. */
+details.fold { padding: 0; overflow: hidden; }
+details.fold > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  margin: 0;
+  border-radius: var(--radius);
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::after {
+  content: '';
+  margin-left: auto;
+  width: 8px; height: 8px;
+  border-right: 2px solid var(--mute);
+  border-bottom: 2px solid var(--mute);
+  transform: rotate(45deg) translateY(-3px);
+  transition: transform .15s ease;
+  flex: 0 0 auto;
+}
+details.fold[open] > summary::after { transform: rotate(225deg) translateY(-1px); }
+details.fold > summary:hover { background: var(--tint); }
+details.fold > summary h2 { margin: 0; font-size: 14px; font-weight: 650; }
+details.fold > summary + * { margin-top: 0; }
+details.fold > :not(summary) { margin-left: 16px; margin-right: 16px; }
+details.fold > :last-child { margin-bottom: 16px; }
+.foldmeta { margin-left: auto; font-size: 11.5px; color: var(--mute); }
+details.fold > summary .foldmeta { margin-left: auto; }
+
+/* Buttons: one primary, quiet secondaries, clear press feedback. */
+.btn {
+  border-radius: var(--radius-sm);
+  padding: 9px 14px;
+  font-weight: 600;
+  transition: background .12s ease, border-color .12s ease, transform .06s ease, opacity .12s ease;
+  box-shadow: 0 1px 1px rgba(16, 24, 40, .04);
+}
+.btn:active { transform: translateY(1px); }
+.btn.g { box-shadow: none; }
+.btn.g:hover { background: var(--tint); opacity: 1; }
+.btn.s { border-radius: 8px; }
+.btn.wide { border-radius: 12px; }
+
+/* Inputs: a single quiet well, and a real focus ring instead of a thick outline. */
+input, select, textarea {
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* Tables: hairline rows, no zebra striping, a sticky quiet header. */
+tr:nth-child(even) td { background: transparent; }
+tbody tr:hover td { background: var(--tint); }
+th { background: var(--card); border-bottom: 1px solid var(--line); }
+.tw { border-radius: var(--radius-sm); }
+
+/* Navigation reads as a modern rail, with the accent on the active item. */
+.snav .nitem.on {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  font-weight: 650;
+}
+.pchip.on { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+nav:not(.tabbar) button.on { background: var(--accent); color: var(--accent-ink); }
+.sync.live i { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+
+/* The biometric unlock sits above the PIN form and is deliberately secondary. */
+.lockbox .btn.bio { width: 100%; margin: 0 0 10px; border-radius: 12px; }
+.lockbox input { border-radius: 12px; }
+
+/* Settings group headings: less shouting, more rhythm. */
+.grouphead { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--mute); margin: 22px 0 8px; }
+
+@media (max-width: 560px) {
+  .card { padding: 14px; }
+  .card > h2 { font-size: 13.5px; }
+  details.fold > summary { padding: 13px 14px; }
+  details.fold > :not(summary) { margin-left: 14px; margin-right: 14px; }
+  .content { padding-top: 8px; }
+}
+
+/* A quiet fold inside a card: no frame, just a disclosure line. */
+.subfold { margin: 2px 0 8px; }
+.subfold > summary { cursor: pointer; list-style: none; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+.subfold > summary::-webkit-details-marker { display: none; }
+.subfold > summary::after { content: '▾'; font-size: 10px; opacity: .7; }
+.subfold[open] > summary::after { content: '▴'; }

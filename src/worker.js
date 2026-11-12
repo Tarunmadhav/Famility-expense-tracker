@@ -22,6 +22,7 @@ import {
   insertFile,
   isEmail,
   isStrongPassword,
+  accountHasPin,
   listAiConnections,
   listFiles,
   listNotificationsAcross,
@@ -98,6 +99,7 @@ import {
   deliverPending,
   handleUpdate,
   linkForUser,
+  registerWebhook,
   sendMessage,
   setPreview,
   telegramConfigured,
@@ -105,6 +107,7 @@ import {
   telegramWebhookConfigured,
   unlinkTelegram,
   webhookSecretOk,
+  webhookStatus,
 } from './telegram.js';
 import { ICONS } from './icons.js';
 import {
@@ -457,22 +460,6 @@ function assertSpaceCollection(space, collection) {
   if (String(space).startsWith('o:') && !OFFICE_COLLECTIONS.has(String(collection))) {
     throw new HttpError(400, 'That module is not available in the office book');
   }
-}
-
-/**
- * Contact import is a one-off job for one account and one book, so the allowlist
- * lives in two Worker vars: CONTACT_IMPORT_EMAIL and CONTACT_IMPORT_BOOK. They are
- * server-side only (the client is told a boolean at most), and with either unset
- * contact import is off for everybody rather than open to everybody.
- */
-async function contactImportAllowed(env, session, space) {
-  const allowEmail = normaliseEmail(env.CONTACT_IMPORT_EMAIL || '');
-  const allowBook = String(env.CONTACT_IMPORT_BOOK || '').trim().toLowerCase();
-  if (!allowEmail || !allowBook || !space) return false;
-  const own = await credentialsFor(env, session.userId);
-  if (!own || normaliseEmail(own.email) !== allowEmail) return false;
-  const book = await env.DB.prepare(`SELECT name FROM profiles WHERE id = ?`).bind(space).first();
-  return Boolean(book && String(book.name || '').trim().toLowerCase() === allowBook);
 }
 
 const WRITE_LIMIT = 120;
@@ -946,7 +933,7 @@ async function handleApi(request, env, ctx, url) {
     }
     let reply = '';
     try {
-      reply = await handleUpdate(env, update);
+      reply = await handleUpdate(env, update, new URL(request.url).origin);
     } catch (err) {
       console.error('telegram update failed', err && err.message ? String(err.message).slice(0, 200) : 'unknown');
       reply = 'Something went wrong. Try again in a moment.';
@@ -1118,16 +1105,23 @@ async function handleApi(request, env, ctx, url) {
   }
 
   if (path === '/api/auth/pin' && method === 'POST') {
-    // The PIN unlocks the whole household, so rewriting it needs the same right
-    // as any other household-wide change. A viewer who knows the current PIN
-    // must not be able to lock the owner out.
-    await resolveProfile(env, session, session.household || 'family', 'manage');
+    // Each account owns its own PIN, so any signed-in member may change their own.
+    // The old route required 'manage' on the household and then rewrote the first
+    // account in the table, which is why a viewer was refused and an owner's change
+    // could land on somebody else's row.
     const body = await readJson(request);
     if (!PIN_RE.test(String(body.newPin || ''))) throw new HttpError(400, 'PIN must be 4-12 digits');
-    const ok = await verifyPin(env, String(body.currentPin || ''));
+    // An email/password account has no PIN row, and verifyUserPin() answers false
+    // for it. Say so instead of claiming the current PIN is wrong.
+    if (!(await accountHasPin(env, session.userId))) {
+      throw new HttpError(400, 'This account signs in with a password, so there is no PIN to change');
+    }
+    const ok = await verifyUserPin(env, session.userId, String(body.currentPin || ''));
     if (!ok) throw new HttpError(401, 'Current PIN is incorrect');
-    await updatePin(env, String(body.newPin));
+    const changed = await updatePin(env, session.userId, String(body.newPin));
+    if (!changed) throw new HttpError(400, 'This account has no PIN to change');
     await deleteUserSessions(env, session.userId, session.sessionId);
+    await audit(env, { action: 'auth.pin', actor: session.userId });
     return json({ ok: true });
   }
 
@@ -1182,6 +1176,11 @@ async function handleApi(request, env, ctx, url) {
       botUsername: botUsername(env),
       // The app shows exactly which secret the owner still has to add.
       missing: telegramMissing(env),
+      // Whether Telegram is actually posting to this deployment. Without it the
+      // bot can never answer /link, however healthy the token looks. This is one
+      // call to api.telegram.org, so it only runs when Settings asks for it —
+      // not on every app load.
+      webhook: url.searchParams.get('webhook') === '1' ? await webhookStatus(env, url.origin) : undefined,
       link: link
         ? {
             username: link.username,
@@ -1203,6 +1202,16 @@ async function handleApi(request, env, ctx, url) {
     // The code is not stored anywhere in readable form, so this response is the
     // only copy: it must never be cached or logged.
     return json({ ok: true, code: out.code, minutes: out.minutes }, 200, { 'Cache-Control': 'no-store' });
+  }
+
+  if (path === '/api/telegram/webhook/register' && method === 'POST') {
+    // Owner action from Settings: point the shared bot at this deployment. Only a
+    // household manager may move it, because one bot serves every household.
+    if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
+    await resolveProfile(env, session, session.household || 'family', 'manage');
+    const out = await registerWebhook(env, url.origin);
+    await audit(env, { action: 'auth.telegram', actor: session.userId, detail: 'webhook' });
+    return json({ ok: true, ...out });
   }
 
   if (path === '/api/telegram/unlink' && method === 'POST') {
@@ -1315,7 +1324,12 @@ async function handleApi(request, env, ctx, url) {
     const back = new URL('/', url.origin);
     back.searchParams.set('tab', 'settings');
     if (url.searchParams.get('error')) {
+      // Google returns access_denied for a cancelled consent AND for an app the
+      // project has not verified or added this person to. Passing the code through
+      // is what turns "it just will not connect" into an actionable message.
       back.searchParams.set('cloud', 'denied');
+      const code = String(url.searchParams.get('error') || '').slice(0, 60);
+      if (code) back.searchParams.set('why', code);
       return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
     }
     try {
@@ -1336,6 +1350,10 @@ async function handleApi(request, env, ctx, url) {
     } catch (err) {
       console.error('cloud connect failed', provider, err && err.message);
       back.searchParams.set('cloud', 'failed');
+      // The reason the exchange failed is the difference between "try again" and
+      // "add this person as a test user / allow the callback URL".
+      const why = String((err && err.message) || '').slice(0, 160);
+      if (why) back.searchParams.set('why', why);
     }
     return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
   }
@@ -1421,9 +1439,6 @@ async function handleApi(request, env, ctx, url) {
       profiles,
       profile: { id: profile.id, kind: profile.kind, name: profile.name, role: profile.role },
       permissions: ['view', 'create', 'update', 'delete', 'export', 'manage', 'share'],
-      // A boolean, never the address: the client only decides whether to show the
-      // Import button. The server check above is the real gate.
-      canImportContacts: await contactImportAllowed(env, session, space),
       version: APP_VERSION,
     });
   }
@@ -1494,11 +1509,6 @@ async function handleApi(request, env, ctx, url) {
     const collection = String(body.collection || '');
     if (!COLLECTIONS[collection]) throw new HttpError(400, 'Unknown collection');
     assertSpaceCollection(space, collection);
-    // A restore is this account's own backup coming back, not an import, so the
-    // allowlist only guards the import path.
-    if (collection === 'contacts' && body.restore !== true && !(await contactImportAllowed(env, session, space))) {
-      throw new HttpError(403, 'Contact import is not enabled for this account');
-    }
     const dedupeKey =
       collection === 'contacts'
         ? (doc) => {

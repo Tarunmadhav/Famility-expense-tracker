@@ -23,7 +23,10 @@ export const CLOUD_PROVIDERS = {
     scope: 'openid email https://www.googleapis.com/auth/drive.appdata',
     clientIdKey: 'GOOGLE_CLIENT_ID',
     clientSecretKey: 'GOOGLE_CLIENT_SECRET',
-    extraAuthorize: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
+    // select_account matters on a shared phone: without it Google silently reuses
+    // whichever account last consented, so a member who is told to connect Drive
+    // lands on somebody else's drive and is refused (or backs up into it).
+    extraAuthorize: { access_type: 'offline', prompt: 'consent select_account', include_granted_scopes: 'true' },
   },
 };
 

@@ -18,6 +18,9 @@ import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.graphics.Color;
+import android.hardware.biometrics.BiometricPrompt;
+import android.hardware.fingerprint.FingerprintManager;
+import android.os.CancellationSignal;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.view.Gravity;
@@ -62,6 +65,13 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private View splash;
+    // Non-null while the system biometric prompt is up. It is also the guard that
+    // stops a double tap from opening two prompts on top of each other.
+    private CancellationSignal biometricCancel;
+    // The lock screen asks once per paint; the answer is cached for the loaded
+    // page so a re-render never waits on the bridge again.
+    private boolean biometricKnown;
+    private boolean biometricEnrolled;
     // System bar height in CSS pixels, published to the page as --inset-top/--inset-bottom.
     private int insetTopDp;
     private int insetBottomDp;
@@ -156,7 +166,18 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
+                // Navigating away invalidates any prompt that belonged to the old
+                // page; leaving it up would authenticate a screen that is gone.
+                cancelBiometric();
+                biometricKnown = false;
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
+                // A new page may be shown after the person enrolled or removed a
+                // fingerprint in system settings, so the cached answer is dropped.
+                biometricKnown = false;
                 hideSplash();
                 pushInsets();
                 CookieManager.getInstance().flush();
@@ -365,10 +386,19 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // The person may have enrolled or removed a credential in system settings
+        // while the app was away, so the cached answer is no longer trusted.
+        biometricKnown = false;
         // A picker that returned without a result (back press) still ends the pause
         // exemption, so the next Home press locks as usual.
         if (choosingFile && filePathCallback == null) choosingFile = false;
         if (web != null) web.onResume();
+    }
+
+    @Override
+    protected void onDestroy() {
+        cancelBiometric();
+        super.onDestroy();
     }
 
     @Override
@@ -434,6 +464,112 @@ public class MainActivity extends Activity {
         return "https".equals(uri.getScheme()) && APP_HOST.equals(uri.getHost());
     }
 
+    /**
+     * A fingerprint reader or face unlock, with at least one credential enrolled.
+     * Android 9+ answers this through BiometricManager; the two older releases
+     * this app supports (26-27) only have FingerprintManager.
+     */
+    private boolean biometricAvailable() {
+        if (biometricKnown) return biometricEnrolled;
+        boolean enrolled = false;
+        try {
+            if (Build.VERSION.SDK_INT >= 28) {
+                android.hardware.biometrics.BiometricManager manager =
+                        (android.hardware.biometrics.BiometricManager) getSystemService(Context.BIOMETRIC_SERVICE);
+                enrolled = manager != null && manager.canAuthenticate()
+                        == android.hardware.biometrics.BiometricManager.BIOMETRIC_SUCCESS;
+            } else {
+                FingerprintManager legacy =
+                        (FingerprintManager) getSystemService(Context.FINGERPRINT_SERVICE);
+                enrolled = legacy != null && legacy.isHardwareDetected() && legacy.hasEnrolledFingerprints();
+            }
+        } catch (Exception error) {
+            enrolled = false;
+        }
+        biometricEnrolled = enrolled;
+        biometricKnown = true;
+        return enrolled;
+    }
+
+    /**
+     * One system prompt. The page is told only pass or fail — never the reason and
+     * never anything the sensor saw — so a cancelled prompt and a rejected finger
+     * both land on "use your PIN".
+     */
+    private void startBiometric() {
+        if (biometricCancel != null) return;
+        try {
+            biometricCancel = new CancellationSignal();
+            if (Build.VERSION.SDK_INT >= 28) {
+                BiometricPrompt prompt = new BiometricPrompt.Builder(this)
+                        .setTitle("Unlock Family Planner")
+                        .setSubtitle("Confirm it is you")
+                        .setNegativeButton("Use PIN", getMainExecutor(), (dialog, which) -> finishBiometric(false))
+                        .build();
+                prompt.authenticate(biometricCancel, getMainExecutor(),
+                        new BiometricPrompt.AuthenticationCallback() {
+                            @Override
+                            public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) {
+                                finishBiometric(true);
+                            }
+
+                            @Override
+                            public void onAuthenticationError(int code, CharSequence message) {
+                                finishBiometric(false);
+                            }
+                        });
+            } else {
+                FingerprintManager legacy =
+                        (FingerprintManager) getSystemService(Context.FINGERPRINT_SERVICE);
+                if (legacy == null) {
+                    finishBiometric(false);
+                    return;
+                }
+                legacy.authenticate(null, biometricCancel, 0,
+                        new FingerprintManager.AuthenticationCallback() {
+                            @Override
+                            public void onAuthenticationSucceeded(FingerprintManager.AuthenticationResult result) {
+                                finishBiometric(true);
+                            }
+
+                            @Override
+                            public void onAuthenticationError(int code, CharSequence message) {
+                                finishBiometric(false);
+                            }
+                        }, null);
+            }
+        } catch (Exception error) {
+            finishBiometric(false);
+        }
+    }
+
+    /** Drops a prompt that is still waiting; the page hears "not recognised". */
+    private void cancelBiometric() {
+        if (biometricCancel == null) return;
+        CancellationSignal signal = biometricCancel;
+        biometricCancel = null;
+        try {
+            signal.cancel();
+        } catch (Exception ignored) {
+            // already finished
+        }
+    }
+
+    private void finishBiometric(boolean ok) {
+        biometricCancel = null;
+        if (web == null) return;
+        final boolean passed = ok;
+        web.post(new Runnable() {
+            @Override
+            public void run() {
+                if (web == null) return;
+                web.evaluateJavascript(
+                        "window.__plannerBiometric&&window.__plannerBiometric(" + (passed ? "true" : "false") + ")",
+                        null);
+            }
+        });
+    }
+
     /** Exposed to JavaScript as window.AndroidBridge. */
     class AndroidBridge {
         AndroidBridge() {
@@ -467,11 +603,43 @@ public class MainActivity extends Activity {
             return insetTopDp + "," + insetBottomDp;
         }
 
-        /**
-         * Opens a provider's sign-in page in the device's browser. Only the page
-         * already loaded in this WebView may ask for it, and only for https, so
-         * injected content cannot launch arbitrary intents.
-         */
+            /**
+             * True when this phone has a fingerprint reader or face unlock AND the
+             * person has enrolled at least one. The lock screen only shows the
+             * biometric button when this is true, so the button never dead-ends.
+             */
+            @JavascriptInterface
+            public boolean hasBiometric() {
+                if (!onTrustedPage()) return false;
+                return biometricAvailable();
+            }
+
+            /**
+             * Ask the system to authenticate. Returns false when the device cannot,
+             * which the page turns into "use your PIN" instead of a spinner that
+             * never finishes. The result comes back as window.__plannerBiometric(ok).
+             */
+            @JavascriptInterface
+            public boolean promptBiometric() {
+                if (!onTrustedPage()) return false;
+                if (!biometricAvailable()) return false;
+                // A prompt that is already up will answer on its own; starting a
+                // second one would orphan the first callback.
+                if (biometricCancel != null) return true;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        startBiometric();
+                    }
+                });
+                return true;
+            }
+
+            /**
+             * Opens a provider's sign-in page in the device's browser. Only the page
+             * already loaded in this WebView may ask for it, and only for https, so
+             * injected content cannot launch arbitrary intents.
+             */
         @JavascriptInterface
         public boolean openExternal(String url) {
             if (!onTrustedPage()) return false;

@@ -17,6 +17,8 @@ import {
   queueNotification,
   setPreview,
   unlinkTelegram,
+  consumeVerifyCode,
+  issueVerifyCode,
 } from '../src/telegram.js';
 import { makeDatabase } from './helpers/d1.mjs';
 
@@ -397,47 +399,175 @@ test('the card can link straight to the bot, and a bad username is dropped', asy
   assert.equal(badState.data.botUsername, '');
 });
 
-test('every command BotFather lists is answered, including after /unlink', async () => {
+/** A fetch stub that answers both the Bot API and Resend, recording what was sent. */
+function stubBoth() {
+  const replies = [];
+  const emails = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (target.includes('resend.com')) {
+      emails.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ id: 'stub' }), { status: 200 });
+    }
+    replies.push(JSON.parse(init.body).text);
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+  return { replies, emails, restore: () => { globalThis.fetch = real; } };
+}
+
+function sender(env, chatId) {
+  let update = 500;
+  return async (text) => {
+    update += 1;
+    await call(env, '/api/telegram/webhook', {
+      method: 'POST',
+      body: {
+        update_id: update,
+        message: { message_id: update, chat: { id: chatId, type: 'private' }, from: { id: chatId }, text },
+      },
+      headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': SECRET },
+    });
+  };
+}
+
+test('every command in the list is answered, before and after /unlink', async () => {
   const { env } = await setup();
   const owner = await signup(env, 'commands@example.com');
-  const linked = await consumeLinkCode(
+  await consumeLinkCode(
     env,
     (await call(env, '/api/telegram/link', { method: 'POST', cookie: owner.cookie })).data.code,
     { telegramUserId: '700000080', chatId: '700000080' },
   );
-  assert.equal(linked.ok, true);
 
-  const replyTo = async (text, updateId) => {
-    const realFetch = globalThis.fetch;
-    const sent = [];
-    globalThis.fetch = async (url, init) => {
-      sent.push(JSON.parse(init.body).text);
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  const stub = stubBoth();
+  try {
+    const send = sender(env, 700000080);
+    const replyTo = async (text) => {
+      stub.replies.length = 0;
+      await send(text);
+      return stub.replies[0] || '';
     };
-    try {
-      await call(env, '/api/telegram/webhook', {
-        method: 'POST',
-        body: {
-          update_id: updateId,
-          message: { message_id: updateId, chat: { id: 700000080, type: 'private' }, from: { id: 700000080 }, text },
-        },
-        headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': SECRET },
-      });
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-    return sent[0] || '';
-  };
 
-  assert.match(await replyTo('/help', 501), /\/link CODE/);
-  assert.match(await replyTo('/start', 502), /already connected/);
-  assert.match(await replyTo('/status', 503), /Connected to/);
-  assert.match(await replyTo('/settings', 504), /\/settings generic/);
-  assert.match(await replyTo('/settings detailed', 505), /amounts and details/);
-  assert.match(await replyTo('/settings generic', 506), /generic preview/);
-  assert.match(await replyTo('/nonsense', 507), /Unknown command/);
-  // Only after the chat is unlinked does the guard answer first, which is right:
-  // there is nothing to run a command against any more.
-  assert.match(await replyTo('/unlink', 508), /Disconnected/);
-  assert.match(await replyTo('/status', 509), /not connected yet/);
+    assert.match(await replyTo('/help'), /\/verify/);
+    assert.match(await replyTo('/start'), /not verified yet/);
+    assert.match(await replyTo('/status'), /Verified: no/);
+    assert.match(await replyTo('/request'), /Verify this chat first/);
+    assert.match(await replyTo('/upload'), /Verify this chat first/);
+    assert.match(await replyTo('/settings'), /\/settings generic/);
+    assert.match(await replyTo('/settings detailed'), /amounts and details/);
+    assert.match(await replyTo('/settings generic'), /generic preview/);
+    assert.match(await replyTo('/nonsense'), /Unknown command/);
+    assert.match(await replyTo('/unlink'), /Disconnected/);
+    assert.match(await replyTo('/status'), /not connected yet/);
+    assert.match(await replyTo('/logout'), /nothing to sign out of/);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('/verify emails a code, verifies the chat once, and unlocks /request', async () => {
+  const { env } = await setup({ RESEND_API_KEY: 'test-resend-key-not-real' });
+  const owner = await signup(env, 'verify@example.com');
+  await consumeLinkCode(
+    env,
+    (await call(env, '/api/telegram/link', { method: 'POST', cookie: owner.cookie })).data.code,
+    { telegramUserId: '700000081', chatId: '700000081' },
+  );
+
+  const stub = stubBoth();
+  try {
+    const send = sender(env, 700000081);
+
+    stub.replies.length = 0;
+    await send('/verify');
+    assert.equal(stub.emails.length, 1, 'one code email');
+    const reply = stub.replies[0] || '';
+    assert.match(reply, /expires in 10 minutes/);
+    assert.ok(!reply.includes('@'), 'the reply must not contain the address');
+    const code = (stub.emails[0].text.match(/code is ([A-Z0-9]{6})/) || [])[1];
+    assert.ok(code, 'the email carries a six-character code');
+    assert.ok(!reply.includes(code), 'the reply must not repeat the code');
+    assert.ok(!stub.emails[0].text.includes('700000081'), 'the email must not carry the chat id');
+
+    stub.replies.length = 0;
+    await send('/request');
+    assert.match(stub.replies[0] || '', /Verify this chat first/);
+
+    stub.replies.length = 0;
+    await send(`/verify ${code}`);
+    assert.match(stub.replies[0] || '', /verified/);
+
+    stub.replies.length = 0;
+    await send('/request');
+    assert.match(stub.replies[0] || '', new RegExp(`${ORIGIN}/#data`));
+    stub.replies.length = 0;
+    await send('/upload');
+    assert.match(stub.replies[0] || '', new RegExp(`${ORIGIN}/#contacts`));
+    stub.replies.length = 0;
+    await send('/status');
+    assert.match(stub.replies[0] || '', /Verified: yes/);
+
+    // A code works once.
+    stub.replies.length = 0;
+    await send(`/verify ${code}`);
+    assert.match(stub.replies[0] || '', /not valid or has expired/);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('a verification code expires after ten minutes', async () => {
+  const { env } = await setup();
+  const owner = await signup(env, 'expiry@example.com');
+  await consumeLinkCode(
+    env,
+    (await call(env, '/api/telegram/link', { method: 'POST', cookie: owner.cookie })).data.code,
+    { telegramUserId: '700000082', chatId: '700000082' },
+  );
+
+  const { code, minutes } = await issueVerifyCode(env, { telegramUserId: '700000082', chatId: '700000082' });
+  assert.equal(minutes, 10);
+  await env.DB.prepare(`UPDATE telegram_verify_codes SET expires_at = ? WHERE telegram_user_id = ?`)
+    .bind(Date.now() - 1000, '700000082')
+    .run();
+  assert.equal(await consumeVerifyCode(env, code, { telegramUserId: '700000082' }), false);
+
+  const fresh = await issueVerifyCode(env, { telegramUserId: '700000082', chatId: '700000082' });
+  assert.equal(await consumeVerifyCode(env, fresh.code, { telegramUserId: '700000082' }), true);
+  assert.equal(await consumeVerifyCode(env, fresh.code, { telegramUserId: '700000082' }), false);
+});
+
+test('/logout unlinks this chat only, and the website stays signed in', async () => {
+  const { env } = await setup();
+  const owner = await signup(env, 'logout@example.com');
+  const link = await consumeLinkCode(
+    env,
+    (await call(env, '/api/telegram/link', { method: 'POST', cookie: owner.cookie })).data.code,
+    { telegramUserId: '700000083', chatId: '700000083' },
+  );
+  await env.DB.prepare(`UPDATE telegram_links SET verified_at = ? WHERE user_id = ?`)
+    .bind(Date.now(), link.userId)
+    .run();
+
+  const stub = stubBoth();
+  try {
+    const send = sender(env, 700000083);
+    await send('/logout');
+    assert.match(stub.replies[0] || '', /Signed out/);
+    assert.equal(await linkForUser(env, link.userId), null, 'the chat link survived /logout');
+    assert.equal(
+      (await env.DB.prepare(`SELECT COUNT(*) AS n FROM telegram_verify_codes WHERE telegram_user_id = ?`)
+        .bind('700000083')
+        .first()).n,
+      0,
+      'verification codes survived /logout',
+    );
+
+    // The account's own session is untouched: /logout is a Telegram command.
+    const state = await call(env, '/api/state?since=0', { cookie: owner.cookie });
+    assert.equal(state.status, 200);
+  } finally {
+    stub.restore();
+  }
 });

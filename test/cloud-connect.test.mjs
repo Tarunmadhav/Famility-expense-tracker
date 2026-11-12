@@ -81,7 +81,9 @@ test('connecting with credentials produces one consent URL with PKCE and state',
   // Refresh tokens only arrive with offline access, and Google only reissues them
   // when consent is prompted again.
   assert.equal(url.searchParams.get('access_type'), 'offline');
-  assert.equal(url.searchParams.get('prompt'), 'consent');
+  // select_account was added so a shared phone can pick the right Google account
+  // instead of silently reusing the last one that consented.
+  assert.equal(url.searchParams.get('prompt'), 'consent select_account');
 
   // Each attempt gets its own state, so two tabs cannot overwrite each other.
   const second = await call(env, '/api/cloud/link', { method: 'POST', cookie, body: { provider: 'google' } });
