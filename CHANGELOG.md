@@ -4,6 +4,42 @@ All notable changes to Family Finance Planner. Versions follow the Android
 `versionName`; the API version is separate and only moves when a route changes
 shape.
 
+## [2.7.0] - 2026-11-12
+
+Web and Worker release. The Android `versionName` is 2.7.0 (`versionCode` 11) for the
+next build; no APK has been built or published for it, and the release row
+`/api/version` serves is unchanged.
+
+### Added
+
+- **Tasks have a due time.** A task had only a calendar day, so "6 PM" could not be
+expressed: the form had no time input and `sanitizeDoc` drops fields the collection
+does not declare. Diary tasks now carry an optional `dueTime` and a derived `dueAt`
+(ISO 8601 UTC), which is what reminders compare against. An empty time stays an
+all-day deadline.
+- **Deadline strip above every screen.** Overdue first, then anything due in the next
+24 hours, then anything due later today, each row opening its task. It renders
+nothing when nothing is due and never shows an amount.
+- **Task reminders through Telegram**, on a new quarterly cron, fifteen minutes
+before a task is due, once per task, generic text by default.
+- **Settings reports the phone's notification permission** (`notificationState()` on
+the Android bridge), so a phone with alerts switched off says so instead of
+promising them.
+- **Change PIN asks for the new PIN twice.**
+
+### Fixed
+
+- **One alert could be delivered twice.** A write's background drain and the cron
+could run at the same time; the loser read the delivery row as merely `pending` and
+sent the same alert again. The row now carries a five-minute lease.
+- The migration runner is documented in the README, because
+  `wrangler d1 migrations list` is not this project's source of truth.
+
+### Migration
+
+- `0010_task_due_at` — an expression index on `json_extract(doc, '$.dueAt')` for the
+diary collection. Existing rows are untouched.
+
 ## [2.6.0] - 2026-11-12
 
 Web and Worker release. The Android `versionName` is 2.6.0 (`versionCode` 10) for

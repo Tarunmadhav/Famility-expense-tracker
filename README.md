@@ -14,7 +14,8 @@ a real database, live multi-device sync, PIN-protected sessions and push notific
 * **Website / Android app:** https://family-finance-planner.tarungudipatimadhav.workers.dev
 * **Hosting:** your own Cloudflare account (Workers free plan) — Worker `family-finance-planner`,
   D1 `family-planner` (APAC, region `SIN`), R2 bucket `family-planner-drive` bound as `FILES`.
-  API version **14**, app version **2.6.0** (`GET /api/version`).
+  API version **14**, app version **2.7.0** (`GET /api/health`; `GET /api/version` still serves the
+  published 2.5.0 APK row until a new APK is built).
 * **Accounts:** this deployment is live with real accounts and books. Sign-up is open, so a new
   visitor creates a private planner of their own, or joins an existing household with an invite code.
 * The previous deployment at `site-0f6d51dc…freebuff.page` is untouched and still holds the old data.
@@ -413,6 +414,18 @@ Full setup, command list and the security model: [docs/TELEGRAM.md](docs/TELEGRA
 ten minutes and is stored only as a hash; one Telegram identity per planner account and one account per
 identity; the webhook rejects any request whose `X-Telegram-Bot-Api-Secret-Token` does not match; the
 default alert is a generic "You have a new planner alert" and amounts are opt-in per chat.
+
+## Migrations
+
+Schema changes live in `src/migrations/index.js` and run through the app's own runner
+(`src/migrations/runner.js`), which applies them on the first request after a deploy and
+records each id in `schema_migrations`. **`npx wrangler d1 migrations list` is not the source
+of truth here** — this project has no `migrations/` directory for Wrangler, and the command
+fails on some Node versions. To see what is applied, ask D1 directly:
+
+```cmd
+cd /d "D:\family planner" && npx wrangler d1 execute family-planner --remote --command "SELECT id FROM schema_migrations ORDER BY id DESC LIMIT 5"
+```
 
 ## Owner secret checklist
 
