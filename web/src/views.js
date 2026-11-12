@@ -440,7 +440,8 @@ export function settingsView() {
   <div class="card"><h2>Household &amp; alert settings</h2>
     <div class="fld"><label>Household name</label><input id="s_household" placeholder="e.g. Gudipati household" value="${esc(S.settings.household || '')}"></div>
     <div class="fld"><label>Daily alert time (used for calendar events)</label><input id="s_time" type="time" value="${esc(S.settings.alertTime || '06:00')}"></div>
-    <!-- alert channel field removed: nothing routes by it yet (docs/ROADMAP.md) --><div hidden><label for="s_channel">Alert channel</label><select id="s_channel">${['Push + in-app', 'Telegram', 'All channels'].map((c) => `<option${c === (S.settings.channel || 'Push + in-app') ? ' selected' : ''}>${c}</option>`).join('')}</select></div>
+    <!-- Alert channel removed: nothing routes by it, so it was a control with no
+         effect. See docs/ROADMAP.md, section 1. -->
     <p class="mut">Alerts are shown in the app and pushed to your devices; Telegram is used for the chats you linked above.</p>
     <button class="btn" data-act="saveset">Save settings</button></div>
   <div class="card"><h2>Security</h2>
@@ -451,8 +452,8 @@ export function settingsView() {
     <p class="hint mut">Changing the PIN signs out every other device and leaves this one signed in. Fingerprint unlock stays on.</p>
     <div class="tw" style="margin-top:12px"><table><thead><tr><th>Device</th><th>Signed in</th><th>Status</th></tr></thead><tbody>${sessionRows}</tbody></table></div>
     <p style="margin-top:10px"><button class="btn r" data-act="revoke-sessions">Sign out all devices</button>
-    <button class="btn g" data-act="logout">Sign out here</button></p></div>
-  <div class="card"><h2>Security audit</h2>
+    <button class="btn g" data-act="logout">Sign out here</button></p>
+    <h3 style="margin:16px 0 6px;font-size:15px">Security audit</h3>
     <p class="mut">Sign-ins, failed sign-ins, profile switches, sharing and role changes, exports and deletions, newest first. No financial values or keys are recorded here.</p>
     <details><summary class="mut">Show the last ${(S.audit || []).length} events</summary>
       <div class="tw"><table><thead><tr><th>When</th><th>Action</th><th>Who</th><th>Target</th></tr></thead><tbody>${(S.audit || [])
@@ -602,8 +603,7 @@ export function settingsView() {
       <button class="btn s" data-act="backup-save">Save</button>
     </div>
     <p class="hint mut">Automatic backup is off unless you turn it on. When it runs, the oldest backups beyond the number you keep are deleted from the app folder.</p>
-  </div>
-  <div class="card"><h2>Backup &amp; restore</h2>
+    <h3 style="margin:16px 0 6px;font-size:15px">Backup &amp; restore</h3>
     <p class="mut">Create an encrypted backup of <b>${esc(S.profile ? S.profile.name : 'this profile')}</b> only. The file is sealed with AES-256-GCM under a passphrase you choose here; the passphrase and the key never reach the server, so neither this app nor anyone running it can read the backup. Store it in Google Drive, on a USB stick, or anywhere else — it stays encrypted.</p>
     <div class="tools"><button class="btn" data-act="backup">Create encrypted backup</button>
     <button class="btn g" data-act="restore-backup">Restore from backup</button></div>
