@@ -137,7 +137,7 @@ test('one account cannot write into another account\u2019s book', async () => {
   assert.equal(await contactCount(env, aliceFamily.id), 0);
 });
 
-test('the 500-row limit and the 2 MB file limit still hold', async () => {
+test('the 5000-row limit still holds, and a refused batch writes nothing', async () => {
   const { env } = await setup();
   const owner = await account(env, 'limits@example.com');
   const family = owner.books.find((b) => b.kind === 'family');
