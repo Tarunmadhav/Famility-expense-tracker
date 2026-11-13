@@ -48,10 +48,20 @@ test('the + sheet offers exactly two choices', () => {
   assert.match(html, /Import CSV or Excel/);
 });
 
-test('Settings has five sections in order', () => {
+test('Settings has five folded sections in order', () => {
   seedState();
-  const heads = [...views.settingsView().matchAll(/class="grouphead">([^<]+)</g)].map((m) => m[1]);
-  assert.deepEqual(heads, ['Account', 'Notifications', 'Backup', 'Data', 'About']);
+  const html = views.settingsView();
+  const heads = [...html.matchAll(/<details class="card fold section"><summary><h2>([^<]+)</g)].map((m) => m[1]);
+  assert.deepEqual(heads, ['Account', 'Security', 'Notifications', 'Backup', 'Data and About']);
+  // Collapsed by default: every section opens as a heading, not a wall of cards.
+  assert.equal([...html.matchAll(/<details class="card fold" open/g)].length, 0);
+});
+
+test('the destructive demo buttons are gone from Settings', () => {
+  seedState();
+  const html = views.settingsView();
+  assert.ok(!html.includes('data-act="sample-data"'), 'Load sample data is still offered');
+  assert.ok(!html.includes('data-act="clear-data"'), 'Clear all data is still offered');
 });
 
 test('an unconfigured Telegram shows the owner action, not a working card', () => {

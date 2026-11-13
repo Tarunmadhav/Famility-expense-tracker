@@ -192,7 +192,13 @@ function renderNow() {
     app().innerHTML = views.lockHtml(S.lockError || '');
     autoPromptBiometric();
     const input = document.getElementById('lockpin');
-    if (input) input.focus();
+    if (input) {
+      input.addEventListener('input', () => updateLockDots(input.value.length));
+      // On the phone the keypad is the input method; focusing the text box would
+      // pop the OS keyboard over it. A browser still needs the caret to type.
+      const bridge = typeof window !== 'undefined' ? window.AndroidBridge : null;
+      if (!bridge) input.focus();
+    }
     return;
   }
   biometricPrompted = false;
@@ -303,8 +309,13 @@ async function boot() {
     if (cloud === 'connected') toast('Drive connected — back up or restore from Settings');
     if (cloud === 'denied') toast(`The drive connection was cancelled${tag}`);
     if (cloud === 'failed') toast(`That drive could not be connected${tag}. Try again from Settings.`);
+    // Calendar sync comes back with its own short status flag.
+    const cal = params.get('calendar');
+    if (cal === 'connected') toast('Calendar connected — tasks with a due time now appear in Google Calendar');
+    if (cal === 'denied') toast(`The calendar connection was cancelled${tag}`);
+    if (cal === 'failed') toast(`That calendar could not be connected${tag}. Try again from Settings.`);
     bootTab = params.get('tab') === 'settings' ? 'settings' : '';
-    if (signin || cloud || params.get('tab')) window.history.replaceState({}, '', window.location.pathname);
+    if (signin || cloud || cal || params.get('tab')) window.history.replaceState({}, '', window.location.pathname);
   } catch {
     /* no history support */
   }
@@ -933,6 +944,28 @@ document.addEventListener('click', async (event) => {
       });
       return undefined;
     }
+    case 'lock-key': {
+      const field = document.getElementById('lockpin');
+      if (!field) return undefined;
+      const key = String(el.dataset.key || '');
+      if (key === 'back') field.value = field.value.slice(0, -1);
+      else if (key === 'clear') field.value = '';
+      else field.value = (field.value + key).slice(0, 12);
+      updateLockDots(field.value.length);
+      return undefined;
+    }
+    case 'lock-forgot':
+      if (!confirm('Sign out and reset your PIN? You can sign in again with your email and password.')) return undefined;
+      await guard(async () => {
+        await api.logout().catch(() => {});
+        S.locked = false;
+        S.view = 'login';
+        S.authView = 'forgot';
+        S.authEmailSent = false;
+        S.error = '';
+        render();
+      });
+      return undefined;
     case 'lock-password': {
       const form = document.getElementById('lockpwfrm');
       if (form) form.style.display = 'block';
@@ -1190,6 +1223,28 @@ document.addEventListener('click', async (event) => {
       await guard(async () => {
         const out = await api.cloudLinkStart(id);
         if (out && out.url) window.location.href = out.url;
+      });
+      return undefined;
+    case 'calendar-link':
+      await guard(async () => {
+        const out = await api.calendarSyncLink();
+        if (out && out.url) window.location.href = out.url;
+      });
+      return undefined;
+    case 'calendar-unlink':
+      if (!confirm('Disconnect Google Calendar? Sync stops and the stored token is revoked. Events already in the calendar are left alone.')) return undefined;
+      await guard(async () => {
+        await api.calendarSyncUnlink();
+        await loadSettingsData();
+        render();
+        toast('Calendar disconnected — existing events were left in place');
+      });
+      return undefined;
+    case 'calendar-detail':
+      await guard(async () => {
+        await api.calendarSyncDetail(el.checked === true || el.dataset.on === '1');
+        await loadSettingsData();
+        render();
       });
       return undefined;
     case 'cloud-unlink':
@@ -1696,6 +1751,14 @@ if (typeof window !== 'undefined') setInterval(checkDueReminders, 30 * 1000);
  * credential is enrolled. It presses the same button rather than calling the
  * bridge directly, so a pass still has to be confirmed against the live session.
  */
+/** Redraw the dot row after a keypress on the lock screen. */
+function updateLockDots(count) {
+  const box = document.getElementById('lockdots');
+  if (!box) return;
+  box.dataset.count = String(Math.max(4, Number(count) || 0));
+  box.innerHTML = views.lockDots(Number(count) || 0);
+}
+
 let biometricPrompted = false;
 
 function autoPromptBiometric() {
@@ -1877,6 +1940,7 @@ async function loadSettingsData() {
     // posting to this deployment.
     S.telegram = await api.telegramState(true).catch(() => ({ configured: false }));
     S.calendarFeed = (await api.calendarFeedUrl(S.profileId).catch(() => ({}))).url || '';
+    S.calendarSync = await api.calendarSyncState().catch(() => null);
     S.security = {
       twoFactor: Boolean(twofa.enabled),
       hasRecovery: Boolean(account && account.hasRecovery),

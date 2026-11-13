@@ -187,6 +187,15 @@ input.search { flex: 1 1 220px; min-width: 160px; }
 .lockbox .btn { width: 100%; margin-top: 10px; }
 .lockerr { color: var(--bad); font-size: 12px; min-height: 16px; margin-top: 8px; }
 
+/* The in-app PIN keypad: dots, then a grid of keys, so no OS keyboard appears. */
+.lockdots { display: flex; justify-content: center; gap: 9px; margin: 2px 0 12px; }
+.lockdots .dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--line); }
+.lockdots .dot.on { background: var(--accent); border-color: var(--accent); }
+.lockbox input.lockpin { letter-spacing: .5em; background: var(--tint); color: var(--ink); border: 1px solid var(--line); border-radius: 10px; }
+.keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.keypad .key { padding: 13px 0; font: 600 17px inherit; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink); cursor: pointer; }
+.keypad .key:active { background: var(--tint); }
+
 /* ------------------------------------------------------------- segmented */
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 2px; background: var(--tint); gap: 2px; }
 .seg button { border: 0; background: transparent; color: var(--mute); font: 600 11.5px inherit; padding: 4px 10px; border-radius: 999px; cursor: pointer; }

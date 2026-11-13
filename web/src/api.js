@@ -84,6 +84,13 @@ export const calendarFeedUrl = (profile) =>
 export const rotateCalendarFeed = (profile) =>
   request(`/api/calendar/feed${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`, { method: 'POST' });
 
+// Task sync into the app's own Google Calendar (scope calendar.app.created).
+export const calendarSyncState = () => request('/api/calendar/google');
+export const calendarSyncLink = () => request('/api/calendar/google/link', { method: 'POST' });
+export const calendarSyncUnlink = () => request('/api/calendar/google/unlink', { method: 'POST' });
+export const calendarSyncDetail = (detail) =>
+  request('/api/calendar/google/detail', { method: 'POST', body: { detail } });
+
 export const cloudLinks = () => request('/api/cloud');
 export const cloudLinkStart = (provider) => request('/api/cloud/link', { method: 'POST', body: { provider } });
 export const cloudUnlink = (provider) => request('/api/cloud/unlink', { method: 'POST', body: { provider } });

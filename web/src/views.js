@@ -106,7 +106,8 @@ export function headerSub() {
   const name = (S.profile && S.profile.name) || selfC().name || S.me.name || 'Family';
   const bits = [esc(name)];
   if (kind !== 'office') bits.push(`Surplus ${money(k.surplus)}`);
-  bits.push(`${k.pending} open task${k.pending === 1 ? '' : 's'}`);
+  // The deadline strip below already counts open and overdue tasks, so this line
+  // keeps to the book and the surplus instead of repeating it.
   return bits.join(' · ');
 }
 
@@ -370,7 +371,9 @@ export function settingsView() {
 
   const security = S.security || {};
   return `
-  <h2 class="grouphead">Account</h2>
+  <!-- Five sections, each folded by default: the page opens as a short list of
+       headings instead of a wall of cards. One primary action per section. -->
+  <details class="card fold section"><summary><h2>Account</h2><span class="foldmeta">profile, people, household</span></summary>
   <div class="card"><h2>Your profile</h2>
       <div class="mrow"><span>Signed in as</span><b>${esc(S.me.name || '-')}</b></div>
       <div class="fld" style="margin-top:10px"><label for="ac_name">Display name</label><input id="ac_name" maxlength="60" value="${esc(S.me.name || '')}"></div>
@@ -401,6 +404,8 @@ export function settingsView() {
       .join('') || '<tr><td colspan="4" class="mut">Only you so far</td></tr>'}</tbody></table></div>
     ${S.profile && S.profile.role === 'owner' ? `<p style="margin-top:10px"><button class="btn" data-act="invite">Create invite code</button></p>${S.invite ? `<div class="alerts">Invite code <b>${esc(S.invite.code)}</b> — expires in 72 hours. This code is shown once, so copy it now.</div>` : ''}` : ''}
   </div>
+  </details>
+  <details class="card fold section"><summary><h2>Security</h2><span class="foldmeta">PIN, two-factor, sessions, audit</span></summary>
   <div class="card"><h2>Two-factor &amp; recovery</h2>
     <p class="mut" style="margin-top:0">Two-factor adds a six-digit code from an authenticator app on top of your
       password or PIN. A recovery code resets a forgotten PIN without any device.</p>
@@ -471,7 +476,8 @@ export function settingsView() {
     <div class="fld"><label>Model with image support</label><input id="ai_model" placeholder="gpt-4o-mini / glm-4v"></div>
     <div class="fld"><label>API key</label><input id="ai_key" type="password" autocomplete="off" placeholder="Stored on the server"></div>
     <button class="btn" data-act="ai-add">Connect AI tool</button></details>
-  <h2 class="grouphead">Notifications</h2>
+  </details>
+  <details class="card fold section"><summary><h2>Notifications</h2><span class="foldmeta">Telegram, calendars, this phone</span></summary>
   <div class="card" id="card-telegram"><h2>Telegram</h2>
     ${statusLine(integrationStatus({
       label: 'Telegram',
@@ -508,6 +514,27 @@ export function settingsView() {
     <button class="btn g" data-act="push-test">Send test notification</button>
     <button class="btn g" data-act="push-off">Turn off on this device</button>
     <button class="btn g" data-act="install">Install app</button></div>
+  <div class="card"><h2>Google Calendar</h2>
+    ${S.calendarSync
+      ? !S.calendarSync.configured
+        ? `<p class="hint mut"><b>Calendar is not set up: owner action needed (${esc((S.calendarSync.missing || []).join(', '))})</b></p>
+           <p class="mut">Tasks with a due time are mirrored into a calendar this app creates. Nothing is written until that Google client exists on the deployment.</p>`
+        : `<p class="mut" style="margin-top:0">Tasks with a due time appear in a calendar called <b>Family Finance Planner</b>. The scope is calendar.app.created, so the app can only see and change the calendar it created — never any other calendar in your Google account.</p>
+           <div class="mrow"><span>Status</span><b>${S.calendarSync.linked ? 'Connected' : 'Not connected'}</b></div>
+           ${S.calendarSync.linked ? `<div class="mrow"><span>Events synced</span><b>${Number(S.calendarSync.events) || 0}</b></div>` : ''}
+           ${S.calendarSync.linked && S.calendarSync.failed ? `<div class="mrow"><span>Gave up after 5 tries</span><b>${Number(S.calendarSync.failed)}</b></div>` : ''}
+           ${S.calendarSync.lastError ? `<p class="hint mut" style="color:#b91c1c">Last sync error: ${esc(S.calendarSync.lastError)}</p>` : ''}
+           <div class="tools" style="margin-top:10px">${
+             S.calendarSync.linked
+               ? '<button class="btn g" data-act="calendar-unlink">Disconnect</button>'
+               : S.calendarSync.canConnect
+                 ? '<button class="btn" data-act="calendar-link">Connect Google Calendar</button>'
+                 : '<p class="hint mut">Only the owner of this book can connect its calendar.</p>'
+           }</div>
+           ${S.calendarSync.linked ? `<p class="hint mut">Disconnecting revokes the token and stops sync. Events already in the calendar are left alone.</p>
+             <label class="mrow" style="margin-top:8px"><span>Write amounts into event notes</span><input type="checkbox" data-act="calendar-detail" ${S.calendarSync.detail ? 'checked' : ''}></label>` : ''}`
+      : ''}
+  </div>
   <div class="card"><h2>Calendar subscription</h2>
     <p class="mut" style="margin-top:0">Subscribe once and your calendar keeps itself up to date: open tasks, unpaid bills, insurance renewals and subscription renewals, each with reminders. Works with Google Calendar, Apple Calendar, Outlook, Thunderbird and anything else that accepts a calendar URL. Events update in place, so a paid bill disappears instead of piling up.</p>
     <p class="hint mut" style="margin:0 0 8px">This URL shows only the <b>${esc((S.profiles || []).find((p) => p.id === S.profileId)?.name || 'current')}</b> book. Switch book and open Settings again for that book's own URL.</p>
@@ -526,7 +553,8 @@ export function settingsView() {
       </ul>
       <p class="hint mut">The URL is a secret: anyone who has it can read your event titles, so use <b>New URL</b> if it leaks. It only ever contains the books you are a member of.</p>
     </details></div>
-  <h2 class="grouphead">Backup</h2>
+  </details>
+  <details class="card fold section"><summary><h2>Backup</h2><span class="foldmeta">Google Drive, automatic backup, encrypted copy</span></summary>
   <div class="card"><h2>Google Drive</h2>
     <p class="mut" style="margin-top:0">Keep a full copy of every book you can open in <b>your own</b> Google Drive.
       The file is versioned JSON with a SHA-256 checksum, and the connection keeps a revocable token for the account you pick —
@@ -609,7 +637,8 @@ export function settingsView() {
     <button class="btn g" data-act="restore-backup">Restore from backup</button></div>
     <p class="hint mut">Restoring validates the file first, shows how many records it holds, asks for confirmation, and merges by id — it never wipes the profile first. A backup only contains the profile it was made from.</p>
   </div>
-  <h2 class="grouphead">Data</h2>
+  </details>
+  <details class="card fold section"><summary><h2>Data and About</h2><span class="foldmeta">documents, exports, version</span></summary>
   <details class="card fold"><summary><h2>Documents drive</h2><span class="foldmeta">${(S.files || []).length} file${(S.files || []).length === 1 ? '' : 's'} · ${((S.filesTotal || 0) / 1048576).toFixed(2)} MB</span></summary>
     <p class="mut">Bills and policy documents you attach are kept here.${S.storage === false ? ' Storage is not configured for this site.' : ''}</p>
     ${(S.files || []).length ? `<div class="tw"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Added</th><th></th></tr></thead><tbody>${S.files.map((f) => `<tr><td><a href="/api/files/${esc(f.id)}" target="_blank" rel="noopener">${esc(f.name)}</a></td><td class="mut">${esc(String(f.mime).split('/')[1] || f.mime)}</td><td class="num">${Math.round(Number(f.size) / 1024)} KB</td><td class="mut">${esc(relative(f.created_at))}</td><td class="act"><button class="btn s r" data-act="drive-del" data-id="${esc(f.id)}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mut">Nothing uploaded yet — attach a bill from the Expenses form.</p>'}</details>
@@ -625,19 +654,17 @@ export function settingsView() {
       ? `<a class="btn g" href="${esc(S.release.apkUrl)}" download>Download Android app</a>
          <p class="hint mut" style="word-break:break-all">SHA-256 <code>${esc(S.release.apkSha256 || 'not recorded')}</code></p>`
       : '<p class="hint mut">The owner has not published an APK yet.</p>'}
-    <div class="tools" style="margin-top:12px"><button class="btn g" data-act="sample-data">Load sample data</button>
-      <button class="btn r" data-act="clear-data">Clear all data</button></div>
-    <p class="hint mut" style="margin-top:8px">Clearing removes every contact, bill, expense, policy, task and document for all books. Accounts and settings stay.</p></div>
+    <p class="hint mut" style="margin-top:8px">Clearing and sample data are development-only routes; this deployment does not offer them.</p></div>
   <details class="card fold"><summary><h2>Recent changes</h2></summary>
     <div class="tw"><table><thead><tr><th>Record</th><th>Module</th><th>Action</th><th>When</th></tr></thead><tbody>${activityRows}</tbody></table></div>
   </details>
-  <h2 class="grouphead">About</h2>
   <div class="card"><h2>About</h2>
     <div class="mrow"><span>Version</span><b>${esc(S.release && S.release.version ? S.release.version : S.account.version || '')}</b></div>
     <div class="mrow"><span>Sync</span><b>${S.sync === 'live' ? 'Connected' : 'Reconnecting'}</b></div>
     <p class="mut">Family Finance Planner · ${(S.db.contacts || []).length.toLocaleString('en-IN')} contacts, ${(S.db.payments || []).length} bills, ${(S.db.loans || []).length} loans, ${(S.db.insurance || []).length} policies, ${(S.db.diary || []).length} diary entries. Signed in as ${esc(S.me.name || 'family')}.</p>
     <div class="tools"><button class="btn g" data-act="push-settings">Notification settings</button>
       <button class="btn g" data-act="help">Help</button></div></div>
+  </details>
 `;
 }
 
@@ -731,16 +758,35 @@ export function authShell(html) {
     ${html}</div><div class="authfoot mut">Private household data · secured with a family PIN and signed sessions</div></div>`;
 }
 
+/** The dot row: one filled dot per typed digit, and never fewer than four. */
+export function lockDots(count = 0) {
+  const total = Math.max(4, Number(count) || 0);
+  return Array.from({ length: total }, (_, i) => `<i class="dot${i < count ? ' on' : ''}"></i>`).join('');
+}
+
 export function lockHtml(message = '') {
   return `<div class="lockwrap"><div class="lockbox">
     <div class="brand"><span class="logo">₹</span><div><h1>Family Finance Planner</h1><div class="mut">Locked after inactivity</div></div></div>
     <h2>Unlock to continue</h2>
     <p>Your data was cleared from this screen while it was locked.</p>
     ${biometricButtonHtml()}
-    <form id="lockfrm"><input id="lockpin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="12" placeholder="••••" aria-label="PIN">
+    <form id="lockfrm">
+      <!-- The PIN is typed on the app's own keypad, not the OS keyboard: a numeric
+           PIN box summoned a full QWERTY keyboard on a phone, which is slower and
+           hides half the screen. The input stays for password managers and for a
+           hardware keyboard, but it is not the thing people tap. -->
+      <div class="lockdots" id="lockdots" data-count="4" aria-live="polite" aria-label="PIN length">${lockDots(0)}</div>
+      <input id="lockpin" class="lockpin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="12" placeholder="PIN" aria-label="PIN">
+      <div class="keypad" role="group" aria-label="PIN keypad">
+        ${['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((k) => `<button type="button" class="key" data-act="lock-key" data-key="${k}">${k}</button>`).join('')}
+        <button type="button" class="key" data-act="lock-key" data-key="clear">Clear</button>
+        <button type="button" class="key" data-act="lock-key" data-key="0">0</button>
+        <button type="button" class="key" data-act="lock-key" data-key="back" aria-label="Delete">⌫</button>
+      </div>
       <button class="btn">Unlock</button></form>
     <div class="lockerr" id="lockerr">${esc(message)}</div>
-    <p class="authswitch"><button class="linkbtn" data-act="lock-password">Use email and password instead</button></p>
+    <p class="authswitch"><button class="linkbtn" data-act="lock-forgot">Forgot PIN?</button><br>
+      <button class="linkbtn" data-act="lock-password">Use password instead</button></p>
     <form id="lockpwfrm" style="display:none">
       <div class="fld"><label for="lockemail">Email</label><input id="lockemail" type="email" autocomplete="username"></div>
       <div class="fld"><label for="lockpass">Password</label><input id="lockpass" type="password" autocomplete="current-password"></div>

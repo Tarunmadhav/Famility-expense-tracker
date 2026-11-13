@@ -39,6 +39,8 @@ export const S = {
   // Telegram link state from /api/telegram; the code lives only long enough to
   // be read off the screen, and never reaches local storage.
   telegram: null,
+  // Google Calendar sync for this book, from /api/calendar/google.
+  calendarSync: null,
   telegramCode: '',
   notifications: [],
   unread: 0,
