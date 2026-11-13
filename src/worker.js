@@ -1267,6 +1267,12 @@ async function handleApi(request, env, ctx, url) {
     // household manager may move it, because one bot serves every household.
     if (!sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request blocked');
     await resolveProfile(env, session, session.household || 'family', 'manage');
+    // One bot serves every household, so this button moves where the whole bot
+    // posts. Five moves an hour is more than a person needs and far less than a
+    // script; the refusal names nothing and carries no token.
+    if (await hitRateLimit(env, `tgwebhook:${session.userId}`, 5, 3600_000)) {
+      throw new HttpError(429, 'Too many webhook registrations. Try again later.');
+    }
     const out = await registerWebhook(env, url.origin);
     await audit(env, { action: 'auth.telegram', actor: session.userId, detail: 'webhook' });
     return json({ ok: true, ...out });
