@@ -57,6 +57,34 @@ test('Settings has five folded sections in order', () => {
   assert.equal([...html.matchAll(/<details class="card fold" open/g)].length, 0);
 });
 
+test('each control appears once, so nothing is duplicated across sections', () => {
+  seedState({
+    telegram: { configured: true, link: { username: 'someone', linkedAt: Date.now(), preview: 'generic' } },
+    cloud: [{ id: 'google', label: 'Google Drive', configured: true, linkedAt: Date.now() }],
+  });
+  const html = views.settingsView();
+  const once = ['change-pin', 'calendar-link', 'ics-copy', 'backup', 'restore-backup', 'lock', 'logout', 'push-on', 'cloud-link', 'cloud-upload'];
+  for (const act of once) {
+    const hits = [...html.matchAll(new RegExp(`data-act="${act}"`, 'g'))].length;
+    assert.ok(hits <= 1, `${act} is rendered ${hits} times`);
+  }
+  // One backup card, one calendar card, one audit view.
+  assert.equal([...html.matchAll(/<h2>Encrypted copy<\/h2>/g)].length, 1);
+  assert.equal([...html.matchAll(/<h2>Calendar subscription<\/h2>/g)].length, 1);
+  assert.equal([...html.matchAll(/Show activity/g)].length, 1);
+});
+
+test('each section carries at most one primary button', () => {
+  seedState();
+  const html = views.settingsView();
+  const parts = html.split('<details class="card fold section">').slice(1);
+  assert.equal(parts.length, 5);
+  parts.forEach((part, i) => {
+    const primaries = [...part.matchAll(/<button class="btn" /g)].length;
+    assert.ok(primaries <= 1, `section ${i + 1} has ${primaries} primary buttons`);
+  });
+});
+
 test('the destructive demo buttons are gone from Settings', () => {
   seedState();
   const html = views.settingsView();
