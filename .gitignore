@@ -44,3 +44,7 @@ migration/out/
 
 # earlier, superseded handoff notes (kept on disk, not in the repo)
 family-planner-migration-toolkit/
+
+# Signing keys never belong in a repository (see SECURITY.md, keystore hygiene).
+android/debug.keystore
+signing/

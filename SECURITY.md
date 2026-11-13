@@ -173,16 +173,28 @@ sign-in is ever added. This is a public fact about the certificate, not a secret
 
 ## Test-device signing key (open item, owner decides)
 
-`android/debug.keystore` is committed to this repository and its certificate
+**Corrected 2026-11-13:** `android/debug.keystore` is **not** tracked in the current
+`HEAD`; it was removed from tracking after the first commits (`a25a1ee`, `1ace5f8`)
+and is now also listed in `.gitignore`. The file still exists on this machine so the
+test build keeps working, and it is still present in the repository's history.
+
+Its certificate
 (`CN=Family Planner`, SHA-256 `7DA2409250AF541E7810E0F3370EE18E35DDEDAF75DD2DA2F102BB0AD17E6E8D`)
 is the certificate of the app installed on the test phone. Anyone with the repository
 can therefore sign an APK that the test phone will accept as an update.
 
 - **Today:** the keystore is used only for the Oppo test build (`dist/test/…`), never
   published, never used for `/api/version`, never tagged.
-- **Recommendation:** untrack `android/debug.keystore` (`git rm --cached`), rotate the
-  key for any future device build, and keep a device key outside the repository. Files
-  are not deleted here; that decision is the owner's.
+- **Decision (owner, 2026-11-13):** untrack it and document the rotation plan. It was
+  already untracked, so this run only added `android/debug.keystore` and `signing/` to
+  `.gitignore` and corrected this section. The file was not deleted and no key was
+  rotated.
+- **Rotation plan, when the owner is ready:** generate a new keystore outside the
+  repository (stored as a secret, never committed); sign device builds with it; expect
+  the one-time reinstall because Android refuses an update across signing identities;
+  then replace the `ANDROID_SHA256` debug fingerprint in `wrangler.jsonc` with the new
+  certificate. History still contains the old key, so treat any APK signed with
+  `7DA2409…` as test-only.
 
 ## GET /api/alerts/due
 
