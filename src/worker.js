@@ -84,6 +84,18 @@ import { downloadBackup, finishConnect, listBackups, providerInfo, startConnect 
 import { backupKeyConfigured } from './backupcrypto.js';
 import { CLOUD_PROVIDER_IDS, cloudLink, restoreExport, runBackup, runScheduledBackups } from './backup.js';
 import { calendarFeed, calendarToken } from './calendarfeed.js';
+import {
+  MAX_ATTEMPTS as CAL_MAX_ATTEMPTS,
+  calendarConfig,
+  calendarRow,
+  ensureCalendar,
+  finishCalendarConnect,
+  retryCalendarSync,
+  setCalendarDetail,
+  startCalendarConnect,
+  syncTask,
+  unlinkCalendar,
+} from './calendar.js';
 import { emailConfigured, sendOtpEmail } from './email.js';
 import {
   consumeLoginTicket,
@@ -183,6 +195,11 @@ export default {
     // which is exactly the 15-minute window a task is reminded in.
     ctx.waitUntil(
       remindDueTasks(env, { now }).catch((err) => console.error('task reminders failed', err && err.message)),
+    );
+    // Calendar sync retries ride the same quarter-hour tick: a 429 from Google is
+    // tried again on a backoff instead of waiting for somebody to edit the task.
+    ctx.waitUntil(
+      retryCalendarSync(env, { now }).catch((err) => console.error('calendar sync failed', err && err.message)),
     );
   },
 
@@ -397,7 +414,7 @@ function sameOrigin(request, url) {
  * single use, at most ten minutes old, PKCE-bound and owned by one account, so a
  * cross-site page cannot mint one. Every other method and path keeps the check.
  */
-const OAUTH_RETURN_PATH = /^\/api\/(?:cloud\/callback|auth\/oauth\/callback)\/[a-z]{1,20}$/;
+const OAUTH_RETURN_PATH = /^\/api\/(?:cloud|calendar)\/callback\/[a-z]{1,20}$|^\/api\/auth\/oauth\/callback\/[a-z]{1,20}$/;
 
 function isOAuthReturn(request, url) {
   if (request.method !== 'GET') return false;
@@ -458,6 +475,12 @@ function permissionFor(method, path) {
   // ordinary session routes below.
   if (/^\/api\/calendar\/[0-9a-f]{48}\.ics$/.test(path)) return null;
   if (path === '/api/calendar/feed') return method === 'GET' ? 'view' : 'manage';
+  // Calendar sync: reading the state is a view, everything that connects or
+  // changes it is a manage action. The callback needs the same right as the
+  // account that started it, and only the book's owner can start one.
+  if (path === '/api/calendar/google' && method === 'GET') return 'view';
+  if (path.startsWith('/api/calendar/google')) return 'manage';
+  if (/^\/api\/calendar\/callback\/[a-z]{1,20}$/.test(path)) return 'manage';
   if (path === '/api/health') return null;
   if (path === '/api/notifications/read') return 'view';
   if (path.startsWith('/api/admin/')) return 'manage';
@@ -498,6 +521,16 @@ function assertSpaceCollection(space, collection) {
   if (String(space).startsWith('o:') && !OFFICE_COLLECTIONS.has(String(collection))) {
     throw new HttpError(400, 'That module is not available in the office book');
   }
+}
+
+/**
+ * Destructive demo routes (reset, clear, sample data) exist for local work only.
+ * APP_ENV=development turns them on; a deployed Worker leaves it unset, so they
+ * answer exactly like a route that does not exist. They stay behind the normal
+ * session and role checks, so a member is still refused before this point.
+ */
+function devToolsEnabled(env) {
+  return String(env.APP_ENV || '').toLowerCase() === 'development';
 }
 
 const WRITE_LIMIT = 120;
@@ -1568,6 +1601,15 @@ async function handleApi(request, env, ctx, url) {
     assertSpaceCollection(space, body.collection);
     assertDueMoment(String(body.collection || ''), body.doc);
     const out = await createRecord(env, space, String(body.collection || ''), body.doc || {}, session.userId);
+    // A task with a due time becomes a calendar event; the save itself never waits
+    // for Google, and a failure is retried by the cron.
+    if (String(body.collection || '') === 'diary') {
+      ctx.waitUntil(
+        syncTask(env, { space, recordId: out.record.id, doc: out.record }).catch((err) =>
+          console.error('calendar sync failed', err && err.message),
+        ),
+      );
+    }
     ctx.waitUntil(runBackground(env));
     return json(out);
   }
@@ -1612,11 +1654,25 @@ async function handleApi(request, env, ctx, url) {
       const body = await readJson(request);
       assertDueMoment(collection, body.doc);
       const out = await updateRecord(env, space, collection, id, body.doc || {}, session.userId);
+      if (collection === 'diary') {
+        ctx.waitUntil(
+          syncTask(env, { space, recordId: id, doc: out.record }).catch((err) =>
+            console.error('calendar sync failed', err && err.message),
+          ),
+        );
+      }
       ctx.waitUntil(runBackground(env));
       return json(out);
     }
     if (method === 'DELETE') {
       const out = await deleteRecord(env, space, collection, id, session.userId);
+      if (collection === 'diary') {
+        ctx.waitUntil(
+          syncTask(env, { space, recordId: id, op: 'delete' }).catch((err) =>
+            console.error('calendar sync failed', err && err.message),
+          ),
+        );
+      }
       await audit(env, {
         action: 'record.delete',
         actor: session.userId,
@@ -1820,6 +1876,7 @@ async function handleApi(request, env, ctx, url) {
   }
 
   if (path === '/api/admin/reset' && method === 'POST') {
+    if (!devToolsEnabled(env)) throw new HttpError(404, 'Not found');
     await wipeRecords(env, space);
     await seedDatabase(env, session.userId, space);
     await audit(env, { action: 'data.restore', actor: session.userId, profileId: space, target: 'reset' });
@@ -1827,16 +1884,132 @@ async function handleApi(request, env, ctx, url) {
   }
 
   if (path === '/api/admin/clear' && method === 'POST') {
+    if (!devToolsEnabled(env)) throw new HttpError(404, 'Not found');
     await wipeRecords(env, space);
     await audit(env, { action: 'data.clear', actor: session.userId, profileId: space });
     return json({ ok: true });
   }
 
   if (path === '/api/admin/sample' && method === 'POST') {
+    if (!devToolsEnabled(env)) throw new HttpError(404, 'Not found');
     await wipeRecords(env, space);
     await seedDatabase(env, session.userId, space);
     await audit(env, { action: 'data.restore', actor: session.userId, profileId: space, target: 'sample' });
     return json({ ok: true });
+  }
+
+  /* --------------------------------------------- google calendar sync */
+  // One calendar per book. The scope is calendar.app.created, so the token can
+  // only reach the calendar this app made for that book; it cannot read or change
+  // any other calendar in the account. Only the book's owner may connect it.
+
+  const memberRoleIn = async (profileId, userId) =>
+    (await env.DB.prepare(`SELECT role FROM profile_members WHERE profile_id = ? AND user_id = ?`)
+      .bind(profileId, userId)
+      .first()) || null;
+
+  if (path === '/api/calendar/google' && method === 'GET') {
+    const config = calendarConfig(env);
+    const conn = await calendarRow(env, space);
+    const member = await memberRoleIn(space, session.userId);
+    const linked = (await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM google_events WHERE space = ? AND event_id IS NOT NULL`,
+    )
+      .bind(space)
+      .first()) || { n: 0 };
+    const failed = (await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM google_events WHERE space = ? AND error IS NOT NULL AND attempts >= ?`,
+    )
+      .bind(space, CAL_MAX_ATTEMPTS)
+      .first()) || { n: 0 };
+    return json({
+      configured: config.configured,
+      missing: config.missing,
+      scope: config.scope,
+      linked: Boolean(conn),
+      calendarId: (conn && conn.calendar_id) || '',
+      detail: Number((conn && conn.detail) || 0),
+      lastError: (conn && conn.last_error) || '',
+      lastErrorAt: (conn && conn.last_error_at) || null,
+      events: Number(linked.n) || 0,
+      failed: Number(failed.n) || 0,
+      canConnect: Boolean(member && member.role === 'owner'),
+    });
+  }
+
+  if (path === '/api/calendar/google/link' && method === 'POST') {
+    const config = calendarConfig(env);
+    if (!config.configured) {
+      throw new HttpError(501, `Calendar is not set up: owner action needed (${config.missing.join(', ')}).`);
+    }
+    const member = await memberRoleIn(space, session.userId);
+    if (!member || member.role !== 'owner') {
+      throw new HttpError(403, 'Only the owner of this book can connect its calendar');
+    }
+    const started = await startCalendarConnect(env, {
+      userId: session.userId,
+      profileId: space,
+      redirectUri: `${url.origin}/api/calendar/callback/google`,
+    });
+    return json({ ok: true, url: started.url });
+  }
+
+  // GET only: Google redirects the browser here, which is why this route is exempt
+  // from the origin check. The single-use state proves which account asked.
+  const calendarCallback = path.match(/^\/api\/calendar\/callback\/([a-z]{1,20})$/);
+  if (calendarCallback && method === 'GET') {
+    const back = new URL('/', url.origin);
+    back.searchParams.set('tab', 'settings');
+    if (url.searchParams.get('error')) {
+      back.searchParams.set('calendar', 'denied');
+      const code = String(url.searchParams.get('error') || '').slice(0, 60);
+      if (code) back.searchParams.set('why', code);
+      return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
+    }
+    try {
+      const linked = await finishCalendarConnect(
+        env,
+        url.searchParams.get('code'),
+        url.searchParams.get('state'),
+      );
+      if (linked.userId !== session.userId) throw new HttpError(400, 'That connection belongs to another account');
+      await env.DB.prepare(
+        `INSERT INTO google_calendars (profile_id, user_id, calendar_id, refresh_token, access_token, expires_at, detail, created_at)
+         VALUES (?, ?, '', ?, ?, ?, 0, ?)
+         ON CONFLICT(profile_id) DO UPDATE SET user_id = excluded.user_id,
+           refresh_token = excluded.refresh_token, access_token = excluded.access_token,
+           expires_at = excluded.expires_at, last_error = NULL, last_error_at = NULL`,
+      )
+        .bind(linked.profileId, linked.userId, linked.sealedRefresh, linked.accessToken, linked.expiresAt, Date.now())
+        .run();
+      // Create the calendar right away so the owner sees it in Google Calendar
+      // before the first task is saved. A failure here is retried by the cron.
+      const fresh = await calendarRow(env, linked.profileId);
+      if (fresh) await ensureCalendar(env, fresh).catch(() => {});
+      await audit(env, { action: 'calendar.link', actor: session.userId, profileId: linked.profileId });
+      back.searchParams.set('calendar', 'connected');
+    } catch (err) {
+      console.error('calendar connect failed', err && err.message);
+      back.searchParams.set('calendar', 'failed');
+      const why = String((err && err.message) || '').slice(0, 160);
+      if (why) back.searchParams.set('why', why);
+    }
+    return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
+  }
+
+  if (path === '/api/calendar/google/unlink' && method === 'POST') {
+    const member = await memberRoleIn(space, session.userId);
+    if (!member || member.role !== 'owner') {
+      throw new HttpError(403, 'Only the owner of this book can disconnect its calendar');
+    }
+    const out = await unlinkCalendar(env, space);
+    await audit(env, { action: 'calendar.unlink', actor: session.userId, profileId: space });
+    return json(out);
+  }
+
+  if (path === '/api/calendar/google/detail' && method === 'POST') {
+    const body = await readJson(request);
+    return json(await setCalendarDetail(env, space, Boolean(body.detail)));
   }
 
   if (path === '/api/events' && method === 'GET') {

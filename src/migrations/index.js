@@ -526,4 +526,40 @@ export const MIGRATIONS = [
          WHERE collection = 'diary'`,
     ],
   },
+  {
+    id: '0011_google_calendar',
+    name: 'one google calendar per book, and a mapping from task to event',
+    // The calendar is connected per book: the book's owner consents once, and every
+    // task with a due time in that book is mirrored into the calendar the app
+    // created. The refresh token is sealed like a drive token, so this table never
+    // holds a usable credential.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS google_calendars (
+        profile_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        calendar_id TEXT NOT NULL DEFAULT '',
+        refresh_token TEXT NOT NULL,
+        access_token TEXT,
+        expires_at INTEGER,
+        detail INTEGER NOT NULL DEFAULT 0 CHECK (detail IN (0, 1)),
+        last_error TEXT,
+        last_error_at INTEGER,
+        created_at INTEGER NOT NULL
+      )`,
+      // One row per task, keyed by the book it lives in. The primary key is what
+      // makes a re-sync an update: a second insert cannot create a second event.
+      `CREATE TABLE IF NOT EXISTS google_events (
+        space TEXT NOT NULL,
+        collection TEXT NOT NULL DEFAULT 'diary',
+        record_id TEXT NOT NULL,
+        event_id TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        next_try INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (space, collection, record_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS google_events_retry_idx ON google_events (next_try)`,
+    ],
+  },
 ];
