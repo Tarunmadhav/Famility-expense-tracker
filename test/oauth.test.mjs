@@ -187,20 +187,32 @@ test('an existing provider link wins over a changed address', async () => {
   assert.equal(moved.user.id, alice.user.id);
 });
 
-test('a login ticket works once and expires', async () => {
+test('a login ticket survives exactly one browser hand-off, then dies', async () => {
   const { env } = await freshEnv();
   await env.DB.prepare(
     `INSERT INTO users (id, name, iterations, created_at, role) VALUES ('u1', 'A', 100000, 1, 'owner')`,
   ).run();
   const ticket = await issueLoginTicket(env, 'u1');
+  // Chrome fetches the finish URL first, then Android hands the same URL to the
+  // app: both must get a session, or the phone stays signed out.
   assert.equal(await consumeLoginTicket(env, ticket), 'u1');
-  assert.equal(await consumeLoginTicket(env, ticket), null, 'a ticket must not be redeemable twice');
+  assert.equal(await consumeLoginTicket(env, ticket), 'u1', 'the hand-off to the app was refused');
+  assert.equal(await consumeLoginTicket(env, ticket), null, 'a ticket outlived its two hand-offs');
   assert.equal(await consumeLoginTicket(env, 'x'.repeat(40)), null);
 
-  const stale = await issueLoginTicket(env, 'u1');
-  const row = await env.DB.prepare(`SELECT v FROM meta WHERE k = ?`).bind(`ticket:${stale}`).first();
+  // Two hand-offs, but not two minutes apart.
+  const slow = await issueLoginTicket(env, 'u1');
+  assert.equal(await consumeLoginTicket(env, slow), 'u1');
+  const row = await env.DB.prepare(`SELECT v FROM meta WHERE k = ?`).bind(`ticket:${slow}`).first();
   const parsed = JSON.parse(row.v);
-  parsed.at = Date.now() - 61_000;
-  await setMeta(env, `ticket:${stale}`, parsed);
+  parsed.firstUse = Date.now() - 121_000;
+  await setMeta(env, `ticket:${slow}`, parsed);
+  assert.equal(await consumeLoginTicket(env, slow), null, 'a stale hand-off window was accepted');
+
+  const stale = await issueLoginTicket(env, 'u1');
+  const row2 = await env.DB.prepare(`SELECT v FROM meta WHERE k = ?`).bind(`ticket:${stale}`).first();
+  const parsed2 = JSON.parse(row2.v);
+  parsed2.at = Date.now() - 61_000;
+  await setMeta(env, `ticket:${stale}`, parsed2);
   assert.equal(await consumeLoginTicket(env, stale), null);
 });

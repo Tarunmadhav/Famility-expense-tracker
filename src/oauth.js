@@ -209,16 +209,40 @@ export async function fetchIdentity(env, providerId, token, fetchImpl = fetch) {
 /** One-time ticket that lets the WebView finish a sign-in started in the browser. */
 export async function issueLoginTicket(env, userId) {
   const ticket = b64url(crypto.getRandomValues(new Uint8Array(32)));
-  await setMeta(env, `ticket:${ticket}`, { userId, at: Date.now() });
+  await setMeta(env, `ticket:${ticket}`, { userId, at: Date.now(), uses: 0, firstUse: 0 });
   return ticket;
 }
 
+/** How long after the first redemption a second one may still use the ticket. */
+const TICKET_HANDOFF_MS = 120_000;
+
+/**
+ * Redeem a sign-in ticket.
+ *
+ * A ticket is normally single use, and that was the bug on Android: Chrome fetches
+ * the finish URL first, spends the ticket and keeps the session in its own cookie
+ * jar, and only then does the App Link hand the same (now dead) URL to the app. The
+ * app answered "expired" and the phone stayed signed out, four sign-ins in a row.
+ *
+ * So one extra redemption is allowed inside two minutes of the first. Both agents
+ * end up with their own session for the same account, the second hand-off is what
+ * actually signs the phone in, and the URL is spent the moment two are used or the
+ * window closes.
+ */
 export async function consumeLoginTicket(env, ticket) {
   const value = String(ticket || '');
   if (value.length < 20) return null;
-  const pending = await takeMeta(env, `ticket:${value}`);
+  const key = `ticket:${value}`;
+  const pending = await getMeta(env, key, null);
   if (!pending || !pending.userId) return null;
-  if (!pending.at || Date.now() - pending.at > TICKET_MS) return null;
+  const now = Date.now();
+  if (!pending.at || now - pending.at > TICKET_MS) return null;
+  const uses = Number(pending.uses) || 0;
+  const firstUse = Number(pending.firstUse) || 0;
+  if (uses >= 2) return null;
+  if (uses === 1 && now - firstUse > TICKET_HANDOFF_MS) return null;
+  const spent = uses + 1 >= 2;
+  await setMeta(env, key, spent ? null : { ...pending, uses: uses + 1, firstUse: uses === 0 ? now : firstUse });
   return pending.userId;
 }
 
