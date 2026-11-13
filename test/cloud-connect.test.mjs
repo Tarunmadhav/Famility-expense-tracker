@@ -147,6 +147,37 @@ test('a code exchange stores a sealed refresh token and the provider never sees 
   assert.equal(new URL(replay.location).searchParams.get('cloud'), 'failed');
 });
 
+test('a browser with no planner session still stores the connection', async () => {
+  // This is the Android case: the consent page opens in Chrome, which holds no
+  // planner cookie. Requiring a session here answered 401, so the connection was
+  // silently dropped and the app went on saying "Not connected". The state is the
+  // credential, so the exchange must succeed without a cookie.
+  const { db, env, userId } = await setup();
+  const linked = await startConnect(env, 'google', userId, `${ORIGIN}/api/cloud/callback/google`);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-secret', expires_in: 3600 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  try {
+    const res = await call(
+      env,
+      `/api/cloud/callback/google?code=code-1&state=${encodeURIComponent(linked.state)}`,
+      { origin: null, site: 'cross-site' },
+    );
+    assert.equal(res.status, 200, 'a session-less return was not accepted');
+    assert.match(res.text, /Google Drive connected/);
+    assert.match(res.text, /intent:\/\//, 'the page does not offer the app link back');
+    const row = db.prepare(`SELECT user_id FROM cloud_links WHERE provider = 'google'`).get();
+    assert.equal(row && row.user_id, userId, 'the connection was not stored for the account that started it');
+    const audited = db.prepare(`SELECT 1 AS ok FROM audit_log WHERE action = 'backup.link'`).get();
+    assert.ok(audited, 'the successful connect was not audited');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test('a cross-site GET navigation back from Google connects the drive', async () => {
   const { db, env, cookie, userId } = await setup();
   const linked = await startConnect(env, 'google', userId, `${ORIGIN}/api/cloud/callback/google`);

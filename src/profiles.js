@@ -335,6 +335,11 @@ const AUDIT_ACTIONS = new Set([
   'settings.update',
   'backup.create',
   'backup.restore',
+  // Connecting or disconnecting a drive is a security event: a new token now
+  // exists, or one was revoked. Both were audit() calls that this allowlist
+  // silently dropped, so neither ever appeared in the activity list.
+  'backup.link',
+  'backup.unlink',
   'record.delete',
 ]);
 

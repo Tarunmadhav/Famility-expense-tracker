@@ -387,6 +387,30 @@ function sessionCookie(token, url, maxAge = 30 * 86400) {
   return `${COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${secure}`;
 }
 
+/**
+ * The page a browser gets after a Drive connection is stored without a planner
+ * session: the account is linked, but this tab is not signed in, so it offers the
+ * app link instead of pretending the page is the planner.
+ */
+function connectFinishedPage(origin) {
+  const host = new URL('/', origin).host;
+  const intent = `intent://${host}/?tab=settings&cloud=connected#Intent;scheme=https;package=com.family.planner;end`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Google Drive connected</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:32px;background:#f4f5f7;color:#111}
+.card{max-width:420px;margin:12vh auto;background:#fff;border-radius:16px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+a.btn{display:block;text-align:center;background:#0f766e;color:#fff;text-decoration:none;padding:14px;border-radius:12px;font-weight:600;margin-top:16px}
+p.mut{color:#555;font-size:14px}</style></head><body><div class="card">
+<h1 style="font-size:20px;margin:0 0 8px">Google Drive connected</h1>
+<p class="mut">The planner can now keep a copy in your Drive. Close this tab and open the app to see it under Settings &rarr; Backup.</p>
+<a class="btn" href="${intent}">Open the Planner</a>
+<p class="mut" style="margin-top:12px">Or reopen the app from your home screen.</p>
+</div></body></html>`;
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+  });
+}
+
 function clearCookie(url) {
   const secure = url.protocol === 'https:' || url.hostname !== 'localhost' ? '; Secure' : '';
   return `${COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure}`;
@@ -1018,6 +1042,57 @@ async function handleApi(request, env, ctx, url) {
     return json({ ok: true });
   }
 
+  // The Drive consent return leg, deliberately before the session check: the
+  // provider redirects the *browser* here, and on Android that browser (Chrome)
+  // holds no planner cookie, so requiring a session answered 401 and the
+  // connection was never stored — the app then honestly said "Not connected".
+  //
+  // The state is the credential instead: 24 random bytes, single use, ten minutes
+  // old at most, PKCE-bound, and it names the account that started the connect. A
+  // session, when one happens to be present and matches, only decides whether to
+  // bounce straight back into the app or show a closing page.
+  const cloudReturn = path.match(/^\/api\/cloud\/callback\/([a-z]{1,20})$/);
+  if (cloudReturn && method === 'GET') {
+    const provider = cloudReturn[1];
+    const back = new URL('/', url.origin);
+    back.searchParams.set('tab', 'settings');
+    if (url.searchParams.get('error')) {
+      // Google answers access_denied for a cancelled consent AND for an app whose
+      // project has not verified it or added this person as a test user, so the
+      // code is passed through: "it just will not connect" becomes actionable.
+      back.searchParams.set('cloud', 'denied');
+      const code = String(url.searchParams.get('error') || '').slice(0, 60);
+      if (code) back.searchParams.set('why', code);
+      return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
+    }
+    try {
+      const linked = await finishConnect(env, provider, url.searchParams.get('code'), url.searchParams.get('state'));
+      await env.DB.prepare(
+        `INSERT INTO cloud_links (user_id, provider, refresh_token, access_token, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, provider) DO UPDATE SET refresh_token = excluded.refresh_token,
+           access_token = excluded.access_token, expires_at = excluded.expires_at`,
+      )
+        .bind(linked.userId, linked.provider, linked.sealedRefresh, linked.accessToken, linked.expiresAt, Date.now())
+        .run();
+      await audit(env, { action: 'backup.link', actor: linked.userId, target: provider });
+      const viewer = await getSession(env, readCookie(request, COOKIE));
+      if (viewer && viewer.userId === linked.userId) {
+        back.searchParams.set('cloud', 'connected');
+        return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
+      }
+      return connectFinishedPage(url.origin);
+    } catch (err) {
+      console.error('cloud connect failed', provider, err && err.message);
+      back.searchParams.set('cloud', 'failed');
+      // The reason is the difference between "try again" and "add this person as a
+      // test user / allow the callback URL".
+      const why = String((err && err.message) || '').slice(0, 160);
+      if (why) back.searchParams.set('why', why);
+      return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // allowOAuthReturn only relaxes the origin check for the provider's GET return
   // legs (see isOAuthReturn); the session cookie is still required, and every
   // other request is compared against Origin/Sec-Fetch-Site as before.
@@ -1421,51 +1496,6 @@ async function handleApi(request, env, ctx, url) {
       .run();
     await audit(env, { action: 'backup.unlink', actor: session.userId, target: provider });
     return json({ ok: true });
-  }
-
-  // GET only: the provider redirects the browser here, which is why this route is
-  // exempt from the origin check (isOAuthReturn). The state below is what proves
-  // the request belongs to this account, and it is burned as it is read.
-  const cloudCallback = path.match(/^\/api\/cloud\/callback\/([a-z]{1,20})$/);
-  if (cloudCallback && method === 'GET') {
-    const provider = cloudCallback[1];
-    // Back to the app root, not /settings: the server only serves the shell at /,
-    // so the old target answered 404 and a finished connection looked like a crash.
-    const back = new URL('/', url.origin);
-    back.searchParams.set('tab', 'settings');
-    if (url.searchParams.get('error')) {
-      // Google returns access_denied for a cancelled consent AND for an app the
-      // project has not verified or added this person to. Passing the code through
-      // is what turns "it just will not connect" into an actionable message.
-      back.searchParams.set('cloud', 'denied');
-      const code = String(url.searchParams.get('error') || '').slice(0, 60);
-      if (code) back.searchParams.set('why', code);
-      return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
-    }
-    try {
-      const linked = await finishConnect(env, provider, url.searchParams.get('code'), url.searchParams.get('state'));
-      // A state belongs to the account that asked for it; a callback carrying
-      // another account's state must never write a connection onto this session.
-      if (linked.userId !== session.userId) throw new HttpError(400, 'That connection belongs to another account');
-      await env.DB.prepare(
-        `INSERT INTO cloud_links (user_id, provider, refresh_token, access_token, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(user_id, provider) DO UPDATE SET refresh_token = excluded.refresh_token,
-           access_token = excluded.access_token, expires_at = excluded.expires_at`,
-      )
-        .bind(linked.userId, linked.provider, linked.sealedRefresh, linked.accessToken, linked.expiresAt, Date.now())
-        .run();
-      await audit(env, { action: 'backup.link', actor: session.userId, target: provider });
-      back.searchParams.set('cloud', 'connected');
-    } catch (err) {
-      console.error('cloud connect failed', provider, err && err.message);
-      back.searchParams.set('cloud', 'failed');
-      // The reason the exchange failed is the difference between "try again" and
-      // "add this person as a test user / allow the callback URL".
-      const why = String((err && err.message) || '').slice(0, 160);
-      if (why) back.searchParams.set('why', why);
-    }
-    return new Response(null, { status: 302, headers: { Location: back.toString(), 'Cache-Control': 'no-store' } });
   }
 
   if (path === '/api/cloud/backup' && method === 'POST') {
