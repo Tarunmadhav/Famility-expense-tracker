@@ -154,7 +154,9 @@ function familyDash() {
   return `<div class="dash">
     <section class="hero">
       <div><h2>Good to see you${me.name ? `, ${esc(me.name.split(' ')[0])}` : ''}</h2>
-        <p class="mut">${esc(S.profile ? S.profile.name : 'Family')} · ${k.pending} open task${k.pending === 1 ? '' : 's'} · ${k.unpaid > 0 ? `${money(k.unpaid)} in unpaid bills` : 'no unpaid bills'}</p></div>
+        <!-- The deadline strip above already counts open and overdue tasks, so this
+             line keeps to the money and drops the repeated task number. -->
+        <p class="mut">${esc(S.profile ? S.profile.name : 'Family')} · ${k.unpaid > 0 ? `${money(k.unpaid)} in unpaid bills` : 'no unpaid bills'}</p></div>
     </section>
 
     <div class="stats">
