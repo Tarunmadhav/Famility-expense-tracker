@@ -1200,6 +1200,12 @@ async function handleApi(request, env, ctx, url) {
     // The old route required 'manage' on the household and then rewrote the first
     // account in the table, which is why a viewer was refused and an owner's change
     // could land on somebody else's row.
+    // The current PIN is a credential, so a wrong one is guessed exactly like a
+    // wrong PIN at the lock screen: counted, and refused outright once an address
+    // has used up its tries. Without this a stolen session could grind the PIN
+    // here and then unlock the app with it.
+    const ip = clientIp(request);
+    if (await isLockedOut(env, ip)) throw new HttpError(429, 'Too many attempts. Wait 15 minutes.');
     const body = await readJson(request);
     if (!PIN_RE.test(String(body.newPin || ''))) throw new HttpError(400, 'PIN must be 4-12 digits');
     // An email/password account has no PIN row, and verifyUserPin() answers false
@@ -1208,7 +1214,11 @@ async function handleApi(request, env, ctx, url) {
       throw new HttpError(400, 'This account signs in with a password, so there is no PIN to change');
     }
     const ok = await verifyUserPin(env, session.userId, String(body.currentPin || ''));
-    if (!ok) throw new HttpError(401, 'Current PIN is incorrect');
+    if (!ok) {
+      await recordAuthFailure(env, ip);
+      throw new HttpError(401, 'Current PIN is incorrect');
+    }
+    await clearAuthFailures(env, ip);
     const changed = await updatePin(env, session.userId, String(body.newPin));
     if (!changed) throw new HttpError(400, 'This account has no PIN to change');
     await deleteUserSessions(env, session.userId, session.sessionId);

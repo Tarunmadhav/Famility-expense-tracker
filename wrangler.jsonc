@@ -14,7 +14,10 @@
     // Android App Links. This is the DEBUG keystore fingerprint used by the local
     // emulator build; a release build signs with a different key and its SHA-256
     // must be added here before the app is published (see SECURITY.md).
-    "ANDROID_SHA256": "95:21:80:E2:C9:6E:17:B1:40:C5:6B:5D:26:7E:E8:24:91:BC:11:DF:09:C5:76:EF:B0:C1:22:93:5A:B0:B6:2C,92:FB:42:CC:82:84:01:DD:20:21:20:68:03:DE:56:F8:A7:84:80:7F:F9:FC:B0:AC:16:77:BD:7C:F3:C7:12:D9",
+    // 7D:A2:40:92… is the debug certificate the Oppo test build is signed with. It
+    // was missing here, so Android could not verify the App Link and every OAuth
+    // return (Drive, Calendar) landed in Chrome, which holds no session.
+    "ANDROID_SHA256": "7D:A2:40:92:50:AF:54:1E:78:10:E0:F3:37:0E:E1:8E:35:DD:ED:AF:75:DD:2D:A2:F1:02:BB:0A:D1:7E:6E:8D,95:21:80:E2:C9:6E:17:B1:40:C5:6B:5D:26:7E:E8:24:91:BC:11:DF:09:C5:76:EF:B0:C1:22:93:5A:B0:B6:2C,92:FB:42:CC:82:84:01:DD:20:21:20:68:03:DE:56:F8:A7:84:80:7F:F9:FC:B0:AC:16:77:BD:7C:F3:C7:12:D9",
     "GOOGLE_CLIENT_ID": "311970877046-vghniju6d2gi82sodd7dvjv2hcbk6v9h.apps.googleusercontent.com",
     // Public @username of the shared Telegram bot (no @). Settings links straight
     // to https://t.me/<this>, so people never have to search for the bot.

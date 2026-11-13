@@ -59,6 +59,17 @@
                     android:scheme="https"
                     android:host="family-finance-planner.tarungudipatimadhav.workers.dev"
                     android:pathPrefix="/api/auth/oauth/finish" />
+                <!-- Drive and Calendar consent finish in the browser, and the browser
+                     holds no planner session. These two paths hand the callback back
+                     to the app so it lands in the WebView that is signed in. -->
+                <data
+                    android:scheme="https"
+                    android:host="family-finance-planner.tarungudipatimadhav.workers.dev"
+                    android:pathPrefix="/api/cloud/callback" />
+                <data
+                    android:scheme="https"
+                    android:host="family-finance-planner.tarungudipatimadhav.workers.dev"
+                    android:pathPrefix="/api/calendar/callback" />
             </intent-filter>
         </activity>
 

@@ -62,7 +62,22 @@ public class MainActivity extends Activity {
     private static final int NOTIFICATION_PERMISSION = 7;
     // Social sign-in starts in the system browser and comes back as an app link on
     // this path (see the intent filter in AndroidManifest.xml).
-    private static final String OAUTH_RETURN_PATH = "/api/auth/oauth/finish";
+    // The legs that come back from a browser: a sign-in ticket, and the Drive or
+    // Calendar consent redirects. Each has to land in this WebView, because the
+    // callback exchange needs the session cookie that only the app holds.
+    private static final String[] OAUTH_RETURN_PATHS = {
+            "/api/auth/oauth/finish",
+            "/api/cloud/callback",
+            "/api/calendar/callback",
+    };
+
+    private static boolean isOauthReturn(String path) {
+        if (path == null) return false;
+        for (String prefix : OAUTH_RETURN_PATHS) {
+            if (path.startsWith(prefix)) return true;
+        }
+        return false;
+    }
 
     // A <input type="file"> in the page (import a CSV/Excel file, attach a receipt,
     // restore a backup) only opens the system picker if the WebView has a
@@ -214,7 +229,7 @@ public class MainActivity extends Activity {
         Uri launch = getIntent() == null ? null : getIntent().getData();
         if (launch != null && "https".equals(launch.getScheme())
                 && APP_HOST.equals(launch.getHost() == null ? "" : launch.getHost())
-                && (launch.getPath() == null ? "" : launch.getPath()).startsWith(OAUTH_RETURN_PATH)) {
+                && isOauthReturn(launch.getPath())) {
             web.loadUrl(launch.toString());
         } else {
             web.loadUrl(START_URL);
@@ -350,7 +365,7 @@ public class MainActivity extends Activity {
         if (data == null) return;
         String host = data.getHost() == null ? "" : data.getHost();
         String path = data.getPath() == null ? "" : data.getPath();
-        if (!"https".equals(data.getScheme()) || !APP_HOST.equals(host) || !path.startsWith(OAUTH_RETURN_PATH)) return;
+        if (!"https".equals(data.getScheme()) || !APP_HOST.equals(host) || !isOauthReturn(path)) return;
         if (web != null) web.loadUrl(data.toString());
     }
 
