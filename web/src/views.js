@@ -672,8 +672,11 @@ export function formHtml(collection, record, isNew) {
     } else if (f.t === 'date') {
       html += `<input id="${id}" type="date" value="${esc(/^\d{4}-\d{2}-\d{2}/.test(value) ? String(value).slice(0, 10) : '')}">`;
     } else if (f.t === 'time') {
-      // Optional: left empty the task is an all-day deadline.
-      html += `<input id="${id}" type="time" value="${esc(/^([01]\d|2[0-3]):[0-5]\d$/.test(String(value)) ? String(value) : '')}">`;
+      // A plain HH:MM box rather than the native picker: on the test phone's
+      // WebView the picker closed with its value dropped, which silently turned
+      // every task into an all-day one and so silenced its reminder. Optional:
+      // left empty the task stays an all-day deadline.
+      html += `<input id="${id}" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="HH:MM" value="${esc(/^([01]\d|2[0-3]):[0-5]\d$/.test(String(value)) ? String(value) : '')}">`;
     } else if (f.t === 'file') {
       html += `<input id="${id}" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" data-file-field="1"${value ? ` data-file-id="${esc(value)}"` : ''}>
         <div class="filemeta mut" id="filelabel">${value ? 'Attached document' : 'No file attached (max 8 MB)'}</div>

@@ -21,7 +21,7 @@ import {
 } from './exporters.js';
 import { detectContactFormat, docsFromGoogleRows } from './contactMap.js';
 import { esc } from './format.js';
-import { deadlineItems, momentFromLocal } from './deadlines.js';
+import { deadlineItems, dueDraft } from './deadlines.js';
 
 /*
  * The Android shell cannot expose env(safe-area-inset-*) to a WebView, and Google's
@@ -2021,9 +2021,17 @@ async function saveForm() {
   if (formCollection === 'diary') {
     // Only this device knows what 18:00 means to this person, so the UTC instant
     // is derived here; the server stores and compares it. No time means all-day,
-    // which stores no instant at all.
-    doc.dueAt = doc.due && doc.dueTime ? momentFromLocal(doc.due, doc.dueTime) : '';
-    if (!doc.due) doc.dueTime = '';
+    // which stores no instant at all. A time that cannot be read is refused here,
+    // with the form still open, instead of being saved as a task that never alerts.
+    const draft = dueDraft(doc.due, doc.dueTime);
+    if (!draft.ok) {
+      toast(draft.error);
+      const field = document.getElementById('f_dueTime');
+      if (field) field.focus();
+      return;
+    }
+    doc.dueTime = draft.dueTime;
+    doc.dueAt = draft.dueAt;
   }
   await guard(async () => {
     if (formRecordId) await api.updateRecord(formCollection, formRecordId, doc);

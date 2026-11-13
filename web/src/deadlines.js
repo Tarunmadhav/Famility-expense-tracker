@@ -82,6 +82,31 @@ export function deadlineItems(tasks, now = Date.now()) {
  * The instant a form's date + time mean, as an ISO 8601 UTC string.
  * An empty time means all-day, which stores no instant at all.
  */
+/**
+ * What the form's two fields mean once the person presses Save.
+ *
+ * A typed time is accepted as "18:30" or "9:30" and normalised to HH:MM; anything
+ * else is refused with a readable message and nothing is saved. An empty box is a
+ * deliberate all-day task, so it is not an error.
+ */
+export function dueDraft(dateStr, rawTime) {
+  const day = String(dateStr || '').slice(0, 10);
+  const typed = String(rawTime == null ? '' : rawTime).trim();
+  if (!typed) return { ok: true, dueTime: '', dueAt: '' };
+  const match = /^(\d{1,2}):?(\d{2})$/.exec(typed);
+  const hours = match ? Number(match[1]) : NaN;
+  const minutes = match ? Number(match[2]) : NaN;
+  const error = 'Due time must look like 18:30 (24-hour).';
+  if (!match || hours > 23 || minutes > 59) return { ok: false, error };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    return { ok: false, error: 'Pick a due date first, then a time.' };
+  }
+  const dueTime = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  const dueAt = momentFromLocal(day, dueTime);
+  if (!dueAt) return { ok: false, error };
+  return { ok: true, dueTime, dueAt };
+}
+
 export function momentFromLocal(dateStr, timeStr) {
   const day = String(dateStr || '').slice(0, 10);
   const time = String(timeStr || '').trim();

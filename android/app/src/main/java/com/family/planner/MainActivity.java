@@ -530,11 +530,19 @@ public class MainActivity extends Activity {
         try {
             biometricCancel = new CancellationSignal();
             if (Build.VERSION.SDK_INT >= 28) {
-                BiometricPrompt prompt = new BiometricPrompt.Builder(this)
+                BiometricPrompt.Builder builder = new BiometricPrompt.Builder(this)
                         .setTitle("Unlock Family Planner")
                         .setSubtitle("Confirm it is you")
-                        .setNegativeButton("Use PIN", getMainExecutor(), (dialog, which) -> finishBiometric(false))
-                        .build();
+                        // A visible way out that is not "give up": it lands on the PIN
+                        // form with a readable message, never on a dead screen.
+                        .setNegativeButton("Use PIN", getMainExecutor(), (dialog, which) -> finishBiometric(false));
+                if (Build.VERSION.SDK_INT >= 30) {
+                    // Strong fingerprint only. The device credential (PIN/pattern) is
+                    // the app's own lock screen, not the platform's, so mixing the two
+                    // here would let the system PIN stand in for the planner session.
+                    builder.setAllowedAuthenticators(android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_STRONG);
+                }
+                BiometricPrompt prompt = builder.build();
                 prompt.authenticate(biometricCancel, getMainExecutor(),
                         new BiometricPrompt.AuthenticationCallback() {
                             @Override
